@@ -92,7 +92,7 @@ func Unix(sec int64, nsec int64) Time {
 
 // Rfc3339Copy returns a copy of the Time at second-level precision.
 func (t Time) Rfc3339Copy() Time {
-	copied, _ := time.Parse(time.RFC3339, t.Format(time.RFC3339))
+	copied, _ := time.Parse(time.RFC3339Nano, t.Format(time.RFC3339Nano))
 	return Time{copied}
 }
 
@@ -109,7 +109,7 @@ func (t *Time) UnmarshalJSON(b []byte) error {
 		return err
 	}
 
-	pt, err := time.Parse(time.RFC3339, str)
+	pt, err := time.Parse(time.RFC3339Nano, str)
 	if err != nil {
 		return err
 	}
@@ -130,7 +130,7 @@ func (t *Time) UnmarshalQueryParameter(str string) error {
 		return nil
 	}
 
-	pt, err := time.Parse(time.RFC3339, str)
+	pt, err := time.Parse(time.RFC3339Nano, str)
 	if err != nil {
 		return err
 	}
@@ -145,10 +145,10 @@ func (t Time) MarshalJSON() ([]byte, error) {
 		// Encode unset/nil objects as JSON's "null".
 		return []byte("null"), nil
 	}
-	buf := make([]byte, 0, len(time.RFC3339)+2)
+	buf := make([]byte, 0, len(time.RFC3339Nano)+2)
 	buf = append(buf, '"')
 	// time cannot contain non escapable JSON characters
-	buf = t.UTC().AppendFormat(buf, time.RFC3339)
+	buf = t.UTC().AppendFormat(buf, time.RFC3339Nano)
 	buf = append(buf, '"')
 	return buf, nil
 }
@@ -158,8 +158,8 @@ func (t Time) ToUnstructured() interface{} {
 	if t.IsZero() {
 		return nil
 	}
-	buf := make([]byte, 0, len(time.RFC3339))
-	buf = t.UTC().AppendFormat(buf, time.RFC3339)
+	buf := make([]byte, 0, len(time.RFC3339Nano))
+	buf = t.UTC().AppendFormat(buf, time.RFC3339Nano)
 	return string(buf)
 }
 
@@ -180,7 +180,7 @@ func (t Time) MarshalQueryParameter() (string, error) {
 		return "", nil
 	}
 
-	return t.UTC().Format(time.RFC3339), nil
+	return t.UTC().Format(time.RFC3339Nano), nil
 }
 
 // Fuzz satisfies fuzz.Interface.
@@ -191,7 +191,8 @@ func (t *Time) Fuzz(c fuzz.Continue) {
 	// Allow for about 1000 years of randomness.  Leave off nanoseconds
 	// because JSON doesn't represent them so they can't round-trip
 	// properly.
-	t.Time = time.Unix(c.Rand.Int63n(1000*365*24*60*60), 0)
+	// t.Time = time.Unix(c.Rand.Int63n(1000*365*24*60*60), 0)
+	t.Time = time.Unix(c.Rand.Int63n(1000*365*24*60*60), 1000*c.Rand.Int63n(1000000))
 }
 
 var _ fuzz.Interface = &Time{}

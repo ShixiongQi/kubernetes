@@ -691,7 +691,10 @@ func describePod(pod *corev1.Pod, events *corev1.EventList) (string, error) {
 			w.Write(LEVEL_0, "Node:\t%s\n", pod.Spec.NodeName+"/"+pod.Status.HostIP)
 		}
 		if pod.Status.StartTime != nil {
-			w.Write(LEVEL_0, "Start Time:\t%s\n", pod.Status.StartTime.Time.Format(time.RFC1123Z))
+			w.Write(LEVEL_0, "Start Time (QI):\t%s\n", pod.Status.StartTime.Time.Format(time.RFC1123Z))
+			w.Write(LEVEL_0, "Start Time (QI):\t%s\n", pod.Status.StartTime.Time.Format(time.RFC3339Nano))
+			w.Write(LEVEL_0, "Start Time (QI):\t%s\n", pod.Status.StartTime.Time.Format(time.StampNano))
+			w.Write(LEVEL_0, "Start Time (QI):\t%s\n", pod.Status.StartTime.Time)
 		}
 		printLabelsMultiline(w, "Labels", pod.Labels)
 		printAnnotationsMultiline(w, "Annotations", pod.Annotations)
