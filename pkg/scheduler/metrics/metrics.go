@@ -302,7 +302,14 @@ func Reset() {
 	DeprecatedSchedulingDuration.Reset()
 }
 
+
 // SinceInSeconds gets the time since the specified start in seconds.
 func SinceInSeconds(start time.Time) float64 {
 	return time.Since(start).Seconds()
+	// return time.Since(start).Nanoseconds()
 }
+/*
+func SinceInSeconds(start time.Time) int64 {
+	// return time.Since(start).Seconds()
+	return time.Since(start).Nanoseconds()
+}*/
