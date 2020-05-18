@@ -436,7 +436,6 @@ func (m *manager) updateStatusInternal(pod *v1.Pod, status v1.PodStatus, forceUp
 		debugLog := log.New(logFile,"[StartTime]",log.Lmicroseconds)
 		debugLog.Println(startTime.String())
 		// fmt.Printf("hello, world\n")
-}
 	}
 
 	normalizeStatus(pod, &status)
