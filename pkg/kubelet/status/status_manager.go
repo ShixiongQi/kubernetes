@@ -433,8 +433,9 @@ func (m *manager) updateStatusInternal(pod *v1.Pod, status v1.PodStatus, forceUp
 		logFileName := "/users/sqi009/pod-begin-time.log"
 		logFile, _  := os.OpenFile(logFileName,os.O_RDWR|os.O_APPEND|os.O_CREATE,0644)
 		defer logFile.Close()
-		log.SetFlags(log.LstdFlags)
+		// log.SetFlags(log.LstdFlags)
 		debugLog := log.New(logFile,"",log.Lmicroseconds)
+		log.SetFlags(log.LstdFlags)
 		debugLog.Println(now.String(), "|||", pod.Namespace)
 		// debugLog.Println(pod.Namespace)
 		// fmt.Printf("hello, world\n")
