@@ -338,7 +338,7 @@ func (ds *dockerService) ContainerStatus(_ context.Context, req *runtimeapi.Cont
 	logFile, _  := os.OpenFile(logFileName,os.O_RDWR|os.O_APPEND|os.O_CREATE,0644)
 	defer logFile.Close()
 	debugLog := log.New(logFile,"",log.Lshortfile)
-
+	////////////////////
 	containerID := req.ContainerId
 	r, err := ds.client.InspectContainer(containerID)
 	if err != nil {
