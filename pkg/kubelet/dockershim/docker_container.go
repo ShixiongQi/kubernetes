@@ -23,6 +23,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"log"
+
 	dockertypes "github.com/docker/docker/api/types"
 	dockercontainer "github.com/docker/docker/api/types/container"
 	dockerfilters "github.com/docker/docker/api/types/filters"
@@ -332,6 +334,11 @@ func getContainerTimestamps(r *dockertypes.ContainerJSON) (time.Time, time.Time,
 
 // ContainerStatus inspects the docker container and returns the status.
 func (ds *dockerService) ContainerStatus(_ context.Context, req *runtimeapi.ContainerStatusRequest) (*runtimeapi.ContainerStatusResponse, error) {
+	logFileName := "/users/sqi009/container-started-time.log"
+	logFile, _  := os.OpenFile(logFileName,os.O_RDWR|os.O_APPEND|os.O_CREATE,0644)
+	defer logFile.Close()
+	debugLog := log.New(logFile,"",log.Lshortfile)
+
 	containerID := req.ContainerId
 	r, err := ds.client.InspectContainer(containerID)
 	if err != nil {
@@ -353,7 +360,7 @@ func (ds *dockerService) ContainerStatus(_ context.Context, req *runtimeapi.Cont
 		klog.Warningf("ignore error image %q not found while inspecting docker container %q: %v", r.Image, containerID, err)
 	}
 	imageID := toPullableImageID(r.Image, ir)
-
+	debugLog.Println(startedAt.String(), "|||", imageID)
 	// Convert the mounts.
 	mounts := make([]*runtimeapi.Mount, 0, len(r.Mounts))
 	for i := range r.Mounts {

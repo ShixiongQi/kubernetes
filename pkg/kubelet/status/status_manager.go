@@ -23,6 +23,9 @@ import (
 	"sync"
 	"time"
 
+	"os"
+	"log"
+
 	clientset "k8s.io/client-go/kubernetes"
 
 	v1 "k8s.io/api/core/v1"
@@ -426,6 +429,17 @@ func (m *manager) updateStatusInternal(pod *v1.Pod, status v1.PodStatus, forceUp
 		// if the status has no start time, we need to set an initial time
 		now := metav1.Now()
 		status.StartTime = &now
+		// fmt.Printf("hello, world\n")
+		logFileName := "/users/sqi009/pod-begin-time.log"
+		logFile, _  := os.OpenFile(logFileName,os.O_RDWR|os.O_APPEND|os.O_CREATE,0644)
+		defer logFile.Close()
+		// log.SetFlags(log.LstdFlags)
+		// debugLog := log.New(logFile,"",log.Lmicroseconds)
+		debugLog := log.New(logFile,"",log.Lshortfile)
+		debugLog.Println(now.String(), "|||", pod.Namespace)
+		// debugLog.Println(pod.Namespace)
+		// fmt.Printf("hello, world\n")
+
 	}
 
 	normalizeStatus(pod, &status)
