@@ -32,8 +32,8 @@ import (
 	"time"
 	"unicode"
 
-	"os"
-	clog "log"
+	// "os"
+	// clog "log"
 	"github.com/fatih/camelcase"
 
 	appsv1 "k8s.io/api/apps/v1"
