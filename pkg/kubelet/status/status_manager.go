@@ -430,10 +430,10 @@ func (m *manager) updateStatusInternal(pod *v1.Pod, status v1.PodStatus, forceUp
 		now := metav1.Now()
 		status.StartTime = &now
 		// fmt.Printf("hello, world\n")
-		logFileName := "/users/sqi009/LOG.log"
+		logFileName := "/users/sqi009/pod-begin-time.log"
 		logFile, _  := os.OpenFile(logFileName,os.O_RDWR|os.O_APPEND|os.O_CREATE,0644)
 		defer logFile.Close()
-		debugLog := log.New(logFile,"[StartTime]",log.Lmicroseconds)
+		debugLog := log.New(logFile,"[BeginTime]",log.Lmicroseconds)
 		debugLog.Println(now.String())
 		// fmt.Printf("hello, world\n")
 	}
