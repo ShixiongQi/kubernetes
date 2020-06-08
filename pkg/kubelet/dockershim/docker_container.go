@@ -339,7 +339,7 @@ func (ds *dockerService) ContainerStatus(_ context.Context, req *runtimeapi.Cont
 	logFileName := "/users/sqi009/container-started-time.log"
 	logFile, _  := os.OpenFile(logFileName,os.O_RDWR|os.O_APPEND|os.O_CREATE,0644)
 	defer logFile.Close()
-	debugLog := log.New(logFile,"[StartedTime]",log.Lmicroseconds)
+	debugLog := log.New(logFile,"",log.Lmicroseconds)
 
 	containerID := req.ContainerId
 	r, err := ds.client.InspectContainer(containerID)
