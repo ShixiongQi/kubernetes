@@ -349,7 +349,7 @@ func (ds *dockerService) ContainerStatus(_ context.Context, req *runtimeapi.Cont
 
 	// Parse the timestamps.
 	createdAt, startedAt, finishedAt, err := getContainerTimestamps(r)
-	debugLog.Println(startedAt.String(), "|||", r.Image)
+	// debugLog.Println(startedAt.String(), "|||", r.Image)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse timestamp for container %q: %v", containerID, err)
 	}
@@ -363,7 +363,7 @@ func (ds *dockerService) ContainerStatus(_ context.Context, req *runtimeapi.Cont
 		klog.Warningf("ignore error image %q not found while inspecting docker container %q: %v", r.Image, containerID, err)
 	}
 	imageID := toPullableImageID(r.Image, ir)
-
+	debugLog.Println(startedAt.String(), "|||", imageID)
 	// Convert the mounts.
 	mounts := make([]*runtimeapi.Mount, 0, len(r.Mounts))
 	for i := range r.Mounts {
@@ -425,6 +425,7 @@ func (ds *dockerService) ContainerStatus(_ context.Context, req *runtimeapi.Cont
 
 	labels, annotations := extractLabels(r.Config.Labels)
 	imageName := r.Config.Image
+	debugLog.Println(startedAt.String(), "|||", imageName)
 	if ir != nil && len(ir.RepoTags) > 0 {
 		imageName = ir.RepoTags[0]
 	}
