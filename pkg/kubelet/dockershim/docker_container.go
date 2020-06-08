@@ -339,7 +339,7 @@ func (ds *dockerService) ContainerStatus(_ context.Context, req *runtimeapi.Cont
 	logFileName := "/users/sqi009/container-started-time.log"
 	logFile, _  := os.OpenFile(logFileName,os.O_RDWR|os.O_APPEND|os.O_CREATE,0644)
 	defer logFile.Close()
-	debugLog := log.New(logFile,"",log.Lmicroseconds)
+	debugLog := log.New(logFile,"",log.Lshortfile)
 
 	containerID := req.ContainerId
 	r, err := ds.client.InspectContainer(containerID)
@@ -349,7 +349,7 @@ func (ds *dockerService) ContainerStatus(_ context.Context, req *runtimeapi.Cont
 
 	// Parse the timestamps.
 	createdAt, startedAt, finishedAt, err := getContainerTimestamps(r)
-	debugLog.Println(startedAt.String())
+	debugLog.Println(startedAt.String(), "|||", pod.Namespace)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse timestamp for container %q: %v", containerID, err)
 	}
