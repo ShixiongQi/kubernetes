@@ -32,6 +32,8 @@ import (
 	"time"
 	"unicode"
 
+	"os"
+	clog "log"
 	"github.com/fatih/camelcase"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -2108,7 +2110,7 @@ func describeJob(job *batchv1.Job, events *corev1.EventList) (string, error) {
 	logFileName := "/users/sqi009/describe-pod-begin-time.log"
 	logFile, _  := os.OpenFile(logFileName,os.O_RDWR|os.O_APPEND|os.O_CREATE,0644)
 	defer logFile.Close()
-	debugLog := log.New(logFile,"[BeginTime]",log.Lmicroseconds)
+	debugLog := clog.New(logFile,"[BeginTime]",clog.Lmicroseconds)
 
 	return tabbedString(func(out io.Writer) error {
 		w := NewPrefixWriter(out)
