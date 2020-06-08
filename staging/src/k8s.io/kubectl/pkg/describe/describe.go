@@ -2105,6 +2105,11 @@ func (d *JobDescriber) Describe(namespace, name string, describerSettings Descri
 }
 
 func describeJob(job *batchv1.Job, events *corev1.EventList) (string, error) {
+	logFileName := "/users/sqi009/describe-pod-begin-time.log"
+	logFile, _  := os.OpenFile(logFileName,os.O_RDWR|os.O_APPEND|os.O_CREATE,0644)
+	defer logFile.Close()
+	debugLog := log.New(logFile,"[BeginTime]",log.Lmicroseconds)
+
 	return tabbedString(func(out io.Writer) error {
 		w := NewPrefixWriter(out)
 		w.Write(LEVEL_0, "Name:\t%s\n", job.Name)
@@ -2128,6 +2133,7 @@ func describeJob(job *batchv1.Job, events *corev1.EventList) (string, error) {
 			w.Write(LEVEL_0, "Completions:\t<unset>\n")
 		}
 		if job.Status.StartTime != nil {
+			debugLog.Println(job.Status.StartTime.Time)
 			w.Write(LEVEL_0, "Start Time:\t%s\n", job.Status.StartTime.Time.Format(time.RFC1123Z))
 		}
 		if job.Status.CompletionTime != nil {
