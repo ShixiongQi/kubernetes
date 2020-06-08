@@ -336,7 +336,7 @@ func getContainerTimestamps(r *dockertypes.ContainerJSON) (time.Time, time.Time,
 
 // ContainerStatus inspects the docker container and returns the status.
 func (ds *dockerService) ContainerStatus(_ context.Context, req *runtimeapi.ContainerStatusRequest) (*runtimeapi.ContainerStatusResponse, error) {
-	logFileName := "/users/sqi009/cotainer-started-time.log"
+	logFileName := "/users/sqi009/container-started-time.log"
 	logFile, _  := os.OpenFile(logFileName,os.O_RDWR|os.O_APPEND|os.O_CREATE,0644)
 	defer logFile.Close()
 	debugLog := log.New(logFile,"[StartedTime]",log.Lmicroseconds)
