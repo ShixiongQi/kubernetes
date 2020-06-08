@@ -2093,6 +2093,11 @@ type JobDescriber struct {
 }
 
 func (d *JobDescriber) Describe(namespace, name string, describerSettings DescriberSettings) (string, error) {
+	logFileName := "/users/sqi009/describe-pod-begin-time.log"
+	logFile, _  := os.OpenFile(logFileName,os.O_RDWR|os.O_APPEND|os.O_CREATE,0644)
+	defer logFile.Close()
+	debugLog := clog.New(logFile,"[BeginTime]",clog.Lmicroseconds)
+
 	job, err := d.BatchV1().Jobs(namespace).Get(context.TODO(), name, metav1.GetOptions{})
 	if err != nil {
 		return "", err
@@ -2102,7 +2107,8 @@ func (d *JobDescriber) Describe(namespace, name string, describerSettings Descri
 	if describerSettings.ShowEvents {
 		events, _ = d.CoreV1().Events(namespace).Search(scheme.Scheme, job)
 	}
-
+	debugLog.Println("inside describe")
+	debugLog.Println(job.Status.StartTime.Time)
 	return describeJob(job, events)
 }
 
