@@ -1888,7 +1888,8 @@ func describeStatus(stateName string, state corev1.ContainerState, w PrefixWrite
 	switch {
 	case state.Running != nil:
 		w.Write(LEVEL_2, "%s:\tRunning\n", stateName)
-		w.Write(LEVEL_3, "Started:\t%v\n", state.Running.StartedAt.Time.Format(time.RFC1123Z))
+		// w.Write(LEVEL_3, "Started:\t%v\n", state.Running.StartedAt.Time.Format(time.RFC1123Z))
+		w.Write(LEVEL_3, "Started:\t%v\n", state.Running.StartedAt.Time.Format(time.RFC3339Nano))
 	case state.Waiting != nil:
 		w.Write(LEVEL_2, "%s:\tWaiting\n", stateName)
 		if state.Waiting.Reason != "" {
@@ -2093,10 +2094,10 @@ type JobDescriber struct {
 }
 
 func (d *JobDescriber) Describe(namespace, name string, describerSettings DescriberSettings) (string, error) {
-	logFileName := "/users/sqi009/describe-pod-begin-time.log"
-	logFile, _  := os.OpenFile(logFileName,os.O_RDWR|os.O_APPEND|os.O_CREATE,0644)
-	defer logFile.Close()
-	debugLog := clog.New(logFile,"[BeginTime]",clog.Lmicroseconds)
+	// logFileName := "/users/sqi009/describe-pod-begin-time.log"
+	// logFile, _  := os.OpenFile(logFileName,os.O_RDWR|os.O_APPEND|os.O_CREATE,0644)
+	// defer logFile.Close()
+	// debugLog := clog.New(logFile,"[BeginTime]",clog.Lmicroseconds)
 
 	job, err := d.BatchV1().Jobs(namespace).Get(context.TODO(), name, metav1.GetOptions{})
 	if err != nil {
@@ -2107,16 +2108,16 @@ func (d *JobDescriber) Describe(namespace, name string, describerSettings Descri
 	if describerSettings.ShowEvents {
 		events, _ = d.CoreV1().Events(namespace).Search(scheme.Scheme, job)
 	}
-	debugLog.Println("inside describe")
-	debugLog.Println(job.Status.StartTime.Time)
+	// debugLog.Println("inside describe")
+	// debugLog.Println(job.Status.StartTime.Time)
 	return describeJob(job, events)
 }
 
 func describeJob(job *batchv1.Job, events *corev1.EventList) (string, error) {
-	logFileName := "/users/sqi009/describe-pod-begin-time.log"
-	logFile, _  := os.OpenFile(logFileName,os.O_RDWR|os.O_APPEND|os.O_CREATE,0644)
-	defer logFile.Close()
-	debugLog := clog.New(logFile,"[BeginTime]",clog.Lmicroseconds)
+	// logFileName := "/users/sqi009/describe-pod-begin-time.log"
+	// logFile, _  := os.OpenFile(logFileName,os.O_RDWR|os.O_APPEND|os.O_CREATE,0644)
+	// defer logFile.Close()
+	// debugLog := clog.New(logFile,"[BeginTime]",clog.Lmicroseconds)
 
 	return tabbedString(func(out io.Writer) error {
 		w := NewPrefixWriter(out)
@@ -2141,7 +2142,7 @@ func describeJob(job *batchv1.Job, events *corev1.EventList) (string, error) {
 			w.Write(LEVEL_0, "Completions:\t<unset>\n")
 		}
 		if job.Status.StartTime != nil {
-			debugLog.Println(job.Status.StartTime.Time)
+			// debugLog.Println(job.Status.StartTime.Time)
 			w.Write(LEVEL_0, "Start Time:\t%s\n", job.Status.StartTime.Time.Format(time.RFC1123Z))
 		}
 		if job.Status.CompletionTime != nil {
