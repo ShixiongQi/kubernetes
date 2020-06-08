@@ -25,6 +25,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"log"
+
 	dockertypes "github.com/docker/docker/api/types"
 	dockercontainer "github.com/docker/docker/api/types/container"
 	dockerfilters "github.com/docker/docker/api/types/filters"
