@@ -1889,7 +1889,7 @@ func describeStatus(stateName string, state corev1.ContainerState, w PrefixWrite
 	case state.Running != nil:
 		w.Write(LEVEL_2, "%s:\tRunning\n", stateName)
 		// w.Write(LEVEL_3, "Started:\t%v\n", state.Running.StartedAt.Time.Format(time.RFC1123Z))
-		w.Write(LEVEL_3, "Started:\t%v\n", state.Running.StartedAt.Time.Format(time.RFC3339Nano))
+		w.Write(LEVEL_3, "Started:\t%v\n", state.Running.StartedAt.Time.Format(time.StampNano))
 	case state.Waiting != nil:
 		w.Write(LEVEL_2, "%s:\tWaiting\n", stateName)
 		if state.Waiting.Reason != "" {
