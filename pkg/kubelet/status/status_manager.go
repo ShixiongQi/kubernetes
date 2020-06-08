@@ -435,7 +435,7 @@ func (m *manager) updateStatusInternal(pod *v1.Pod, status v1.PodStatus, forceUp
 		defer logFile.Close()
 		// log.SetFlags(log.LstdFlags)
 		// debugLog := log.New(logFile,"",log.Lmicroseconds)
-		debugLog := log.New(logFile,"",log.LstdFlags)
+		debugLog := log.New(logFile,"",log.Lshortfile)
 		debugLog.Println(now.String(), "|||", pod.Namespace)
 		// debugLog.Println(pod.Namespace)
 		// fmt.Printf("hello, world\n")
