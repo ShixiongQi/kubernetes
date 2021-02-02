@@ -119,10 +119,6 @@ func (r *REST) Watch(ctx context.Context, options *metainternalversion.ListOptio
 	return r.store.Watch(ctx, options)
 }
 
-func (r *REST) Export(ctx context.Context, name string, opts metav1.ExportOptions) (runtime.Object, error) {
-	return r.store.Export(ctx, name, opts)
-}
-
 // Delete enforces life-cycle rules for namespace termination
 func (r *REST) Delete(ctx context.Context, name string, deleteValidation rest.ValidateObjectFunc, options *metav1.DeleteOptions) (runtime.Object, bool, error) {
 	nsObj, err := r.Get(ctx, name, &metav1.GetOptions{})
@@ -221,6 +217,7 @@ func (r *REST) Delete(ctx context.Context, name string, deleteValidation rest.Va
 				return existingNamespace, nil
 			}),
 			dryrun.IsDryRun(options.DryRun),
+			nil,
 		)
 
 		if err != nil {
@@ -253,7 +250,9 @@ func ShouldDeleteNamespaceDuringUpdate(ctx context.Context, key string, obj, exi
 }
 
 func shouldHaveOrphanFinalizer(options *metav1.DeleteOptions, haveOrphanFinalizer bool) bool {
+	//lint:ignore SA1019 backwards compatibility
 	if options.OrphanDependents != nil {
+		//lint:ignore SA1019 backwards compatibility
 		return *options.OrphanDependents
 	}
 	if options.PropagationPolicy != nil {
@@ -263,7 +262,9 @@ func shouldHaveOrphanFinalizer(options *metav1.DeleteOptions, haveOrphanFinalize
 }
 
 func shouldHaveDeleteDependentsFinalizer(options *metav1.DeleteOptions, haveDeleteDependentsFinalizer bool) bool {
+	//lint:ignore SA1019 backwards compatibility
 	if options.OrphanDependents != nil {
+		//lint:ignore SA1019 backwards compatibility
 		return *options.OrphanDependents == false
 	}
 	if options.PropagationPolicy != nil {

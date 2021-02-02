@@ -22,10 +22,12 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"sync"
 	"time"
 
+	cadvisorapi "github.com/google/cadvisor/info/v1"
 	"google.golang.org/grpc"
 	"k8s.io/klog/v2"
 
@@ -35,20 +37,19 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	pluginapi "k8s.io/kubelet/pkg/apis/deviceplugin/v1beta1"
+	podresourcesapi "k8s.io/kubelet/pkg/apis/podresources/v1"
 	v1helper "k8s.io/kubernetes/pkg/apis/core/v1/helper"
 	"k8s.io/kubernetes/pkg/features"
-	podresourcesapi "k8s.io/kubernetes/pkg/kubelet/apis/podresources/v1alpha1"
 	"k8s.io/kubernetes/pkg/kubelet/checkpointmanager"
 	"k8s.io/kubernetes/pkg/kubelet/checkpointmanager/errors"
-	cputopology "k8s.io/kubernetes/pkg/kubelet/cm/cpumanager/topology"
 	"k8s.io/kubernetes/pkg/kubelet/cm/devicemanager/checkpoint"
 	"k8s.io/kubernetes/pkg/kubelet/cm/topologymanager"
-	"k8s.io/kubernetes/pkg/kubelet/cm/topologymanager/bitmask"
 	"k8s.io/kubernetes/pkg/kubelet/config"
 	"k8s.io/kubernetes/pkg/kubelet/lifecycle"
 	"k8s.io/kubernetes/pkg/kubelet/metrics"
 	"k8s.io/kubernetes/pkg/kubelet/pluginmanager/cache"
-	schedulerframework "k8s.io/kubernetes/pkg/scheduler/framework/v1alpha1"
+	"k8s.io/kubernetes/pkg/kubelet/util/format"
+	schedulerframework "k8s.io/kubernetes/pkg/scheduler/framework"
 	"k8s.io/kubernetes/pkg/util/selinux"
 )
 
@@ -97,7 +98,7 @@ type ManagerImpl struct {
 	allocatedDevices map[string]sets.String
 
 	// podDevices contains pod to allocated device mapping.
-	podDevices        podDevices
+	podDevices        *podDevices
 	checkpointManager checkpointmanager.CheckpointManager
 
 	// List of NUMA Nodes available on the underlying machine
@@ -125,11 +126,15 @@ func (s *sourcesReadyStub) AddSource(source string) {}
 func (s *sourcesReadyStub) AllReady() bool          { return true }
 
 // NewManagerImpl creates a new manager.
-func NewManagerImpl(numaNodeInfo cputopology.NUMANodeInfo, topologyAffinityStore topologymanager.Store) (*ManagerImpl, error) {
-	return newManagerImpl(pluginapi.KubeletSocket, numaNodeInfo, topologyAffinityStore)
+func NewManagerImpl(topology []cadvisorapi.Node, topologyAffinityStore topologymanager.Store) (*ManagerImpl, error) {
+	socketPath := pluginapi.KubeletSocket
+	if runtime.GOOS == "windows" {
+		socketPath = os.Getenv("SYSTEMDRIVE") + pluginapi.KubeletSocketWindows
+	}
+	return newManagerImpl(socketPath, topology, topologyAffinityStore)
 }
 
-func newManagerImpl(socketPath string, numaNodeInfo cputopology.NUMANodeInfo, topologyAffinityStore topologymanager.Store) (*ManagerImpl, error) {
+func newManagerImpl(socketPath string, topology []cadvisorapi.Node, topologyAffinityStore topologymanager.Store) (*ManagerImpl, error) {
 	klog.V(2).Infof("Creating Device Plugin manager at %s", socketPath)
 
 	if socketPath == "" || !filepath.IsAbs(socketPath) {
@@ -137,8 +142,8 @@ func newManagerImpl(socketPath string, numaNodeInfo cputopology.NUMANodeInfo, to
 	}
 
 	var numaNodes []int
-	for node := range numaNodeInfo {
-		numaNodes = append(numaNodes, node)
+	for _, node := range topology {
+		numaNodes = append(numaNodes, node.Id)
 	}
 
 	dir, file := filepath.Split(socketPath)
@@ -151,7 +156,7 @@ func newManagerImpl(socketPath string, numaNodeInfo cputopology.NUMANodeInfo, to
 		healthyDevices:        make(map[string]sets.String),
 		unhealthyDevices:      make(map[string]sets.String),
 		allocatedDevices:      make(map[string]sets.String),
-		podDevices:            make(podDevices),
+		podDevices:            newPodDevices(),
 		numaNodes:             numaNodes,
 		topologyAffinityStore: topologyAffinityStore,
 		devicesToReuse:        make(PodReusableDevices),
@@ -206,7 +211,10 @@ func (m *ManagerImpl) removeContents(dir string) error {
 		if filePath == m.checkpointFile() {
 			continue
 		}
-		stat, err := os.Stat(filePath)
+		// TODO: Until the bug - https://github.com/golang/go/issues/33357 is fixed, os.stat wouldn't return the
+		// right mode(socket) on windows. Hence deleting the file, without checking whether
+		// its a socket, on windows.
+		stat, err := os.Lstat(filePath)
 		if err != nil {
 			klog.Errorf("Failed to stat file %s: %v", filePath, err)
 			continue
@@ -394,11 +402,8 @@ func (m *ManagerImpl) Allocate(pod *v1.Pod, container *v1.Container) error {
 func (m *ManagerImpl) UpdatePluginResources(node *schedulerframework.NodeInfo, attrs *lifecycle.PodAdmitAttributes) error {
 	pod := attrs.Pod
 
-	m.mutex.Lock()
-	defer m.mutex.Unlock()
-
 	// quick return if no pluginResources requested
-	if _, podRequireDevicePluginResource := m.podDevices[string(pod.UID)]; !podRequireDevicePluginResource {
+	if !m.podDevices.hasPod(string(pod.UID)) {
 		return nil
 	}
 
@@ -645,62 +650,120 @@ func (m *ManagerImpl) devicesToAllocate(podUID, contName, resource string, requi
 	// This can happen if a container restarts for example.
 	devices := m.podDevices.containerDevices(podUID, contName, resource)
 	if devices != nil {
-		klog.V(3).Infof("Found pre-allocated devices for resource %s container %q in Pod %q: %v", resource, contName, podUID, devices.List())
+		klog.V(3).Infof("Found pre-allocated devices for resource %s container %q in Pod %q: %v", resource, contName, string(podUID), devices.List())
 		needed = needed - devices.Len()
 		// A pod's resource is not expected to change once admitted by the API server,
 		// so just fail loudly here. We can revisit this part if this no longer holds.
 		if needed != 0 {
-			return nil, fmt.Errorf("pod %q container %q changed request for resource %q from %d to %d", podUID, contName, resource, devices.Len(), required)
+			return nil, fmt.Errorf("pod %q container %q changed request for resource %q from %d to %d", string(podUID), contName, resource, devices.Len(), required)
 		}
 	}
 	if needed == 0 {
 		// No change, no work.
 		return nil, nil
 	}
-	klog.V(3).Infof("Needs to allocate %d %q for pod %q container %q", needed, resource, podUID, contName)
-	// Needs to allocate additional devices.
+	klog.V(3).Infof("Needs to allocate %d %q for pod %q container %q", needed, resource, string(podUID), contName)
+	// Check if resource registered with devicemanager
 	if _, ok := m.healthyDevices[resource]; !ok {
 		return nil, fmt.Errorf("can't allocate unregistered device %s", resource)
 	}
-	devices = sets.NewString()
-	// Allocates from reusableDevices list first.
-	for device := range reusableDevices {
-		devices.Insert(device)
-		needed--
-		if needed == 0 {
-			return devices, nil
+
+	// Declare the list of allocated devices.
+	// This will be populated and returned below.
+	allocated := sets.NewString()
+
+	// Create a closure to help with device allocation
+	// Returns 'true' once no more devices need to be allocated.
+	allocateRemainingFrom := func(devices sets.String) bool {
+		for device := range devices.Difference(allocated) {
+			m.allocatedDevices[resource].Insert(device)
+			allocated.Insert(device)
+			needed--
+			if needed == 0 {
+				return true
+			}
 		}
+		return false
 	}
+
+	// Allocates from reusableDevices list first.
+	if allocateRemainingFrom(reusableDevices) {
+		return allocated, nil
+	}
+
 	// Needs to allocate additional devices.
 	if m.allocatedDevices[resource] == nil {
 		m.allocatedDevices[resource] = sets.NewString()
 	}
+
 	// Gets Devices in use.
 	devicesInUse := m.allocatedDevices[resource]
-	// Gets a list of available devices.
+	// Gets Available devices.
 	available := m.healthyDevices[resource].Difference(devicesInUse)
 	if available.Len() < needed {
 		return nil, fmt.Errorf("requested number of devices unavailable for %s. Requested: %d, Available: %d", resource, needed, available.Len())
 	}
-	// By default, pull devices from the unsorted list of available devices.
-	allocated := available.UnsortedList()[:needed]
-	// If topology alignment is desired, update allocated to the set of devices
-	// with the best alignment.
-	hint := m.topologyAffinityStore.GetAffinity(podUID, contName)
-	if m.deviceHasTopologyAlignment(resource) && hint.NUMANodeAffinity != nil {
-		allocated = m.takeByTopology(resource, available, hint.NUMANodeAffinity, needed)
+
+	// Filters available Devices based on NUMA affinity.
+	aligned, unaligned, noAffinity := m.filterByAffinity(podUID, contName, resource, available)
+
+	// If we can allocate all remaining devices from the set of aligned ones, then
+	// give the plugin the chance to influence which ones to allocate from that set.
+	if needed < aligned.Len() {
+		// First allocate from the preferred devices list (if available).
+		preferred, err := m.callGetPreferredAllocationIfAvailable(podUID, contName, resource, aligned.Union(allocated), allocated, required)
+		if err != nil {
+			return nil, err
+		}
+		if allocateRemainingFrom(preferred.Intersection(aligned)) {
+			return allocated, nil
+		}
+		// Then fallback to allocate from the aligned set if no preferred list
+		// is returned (or not enough devices are returned in that list).
+		if allocateRemainingFrom(aligned) {
+			return allocated, nil
+		}
+
+		return nil, fmt.Errorf("unexpectedly allocated less resources than required. Requested: %d, Got: %d", required, required-needed)
 	}
-	// Updates m.allocatedDevices with allocated devices to prevent them
-	// from being allocated to other pods/containers, given that we are
-	// not holding lock during the rpc call.
-	for _, device := range allocated {
-		m.allocatedDevices[resource].Insert(device)
-		devices.Insert(device)
+
+	// If we can't allocate all remaining devices from the set of aligned ones,
+	// then start by first allocating all of the  aligned devices (to ensure
+	// that the alignment guaranteed by the TopologyManager is honored).
+	if allocateRemainingFrom(aligned) {
+		return allocated, nil
 	}
-	return devices, nil
+
+	// Then give the plugin the chance to influence the decision on any
+	// remaining devices to allocate.
+	preferred, err := m.callGetPreferredAllocationIfAvailable(podUID, contName, resource, available.Union(allocated), allocated, required)
+	if err != nil {
+		return nil, err
+	}
+	if allocateRemainingFrom(preferred.Intersection(available)) {
+		return allocated, nil
+	}
+
+	// Finally, if the plugin did not return a preferred allocation (or didn't
+	// return a large enough one), then fall back to allocating the remaining
+	// devices from the 'unaligned' and 'noAffinity' sets.
+	if allocateRemainingFrom(unaligned) {
+		return allocated, nil
+	}
+	if allocateRemainingFrom(noAffinity) {
+		return allocated, nil
+	}
+
+	return nil, fmt.Errorf("unexpectedly allocated less resources than required. Requested: %d, Got: %d", required, required-needed)
 }
 
-func (m *ManagerImpl) takeByTopology(resource string, available sets.String, affinity bitmask.BitMask, request int) []string {
+func (m *ManagerImpl) filterByAffinity(podUID, contName, resource string, available sets.String) (sets.String, sets.String, sets.String) {
+	// If alignment information is not available, just pass the available list back.
+	hint := m.topologyAffinityStore.GetAffinity(podUID, contName)
+	if !m.deviceHasTopologyAlignment(resource) || hint.NUMANodeAffinity == nil {
+		return sets.NewString(), sets.NewString(), available
+	}
+
 	// Build a map of NUMA Nodes to the devices associated with them. A
 	// device may be associated to multiple NUMA nodes at the same time. If an
 	// available device does not have any NUMA Nodes associated with it, add it
@@ -754,7 +817,7 @@ func (m *ManagerImpl) takeByTopology(resource string, available sets.String, aff
 			if perNodeDevices[n].Has(d) {
 				if n == nodeWithoutTopology {
 					withoutTopology = append(withoutTopology, d)
-				} else if affinity.IsSet(n) {
+				} else if hint.NUMANodeAffinity.IsSet(n) {
 					fromAffinity = append(fromAffinity, d)
 				} else {
 					notFromAffinity = append(notFromAffinity, d)
@@ -764,8 +827,8 @@ func (m *ManagerImpl) takeByTopology(resource string, available sets.String, aff
 		}
 	}
 
-	// Concatenate the lists above return the first 'request' devices from it..
-	return append(append(fromAffinity, notFromAffinity...), withoutTopology...)[:request]
+	// Return all three lists containing the full set of devices across them.
+	return sets.NewString(fromAffinity...), sets.NewString(notFromAffinity...), sets.NewString(withoutTopology...)
 }
 
 // allocateContainerResources attempts to allocate all of required device
@@ -776,6 +839,7 @@ func (m *ManagerImpl) allocateContainerResources(pod *v1.Pod, container *v1.Cont
 	podUID := string(pod.UID)
 	contName := container.Name
 	allocatedDevicesUpdated := false
+	needsUpdateCheckpoint := false
 	// Extended resources are not allowed to be overcommitted.
 	// Since device plugin advertises extended resources,
 	// therefore Requests must be equal to Limits and iterating
@@ -800,6 +864,8 @@ func (m *ManagerImpl) allocateContainerResources(pod *v1.Pod, container *v1.Cont
 		if allocDevices == nil || len(allocDevices) <= 0 {
 			continue
 		}
+
+		needsUpdateCheckpoint = true
 
 		startRPCTime := time.Now()
 		// Manager.Allocate involves RPC calls to device plugin, which
@@ -843,14 +909,28 @@ func (m *ManagerImpl) allocateContainerResources(pod *v1.Pod, container *v1.Cont
 			return fmt.Errorf("no containers return in allocation response %v", resp)
 		}
 
+		allocDevicesWithNUMA := checkpoint.NewDevicesPerNUMA()
 		// Update internal cached podDevices state.
 		m.mutex.Lock()
-		m.podDevices.insert(podUID, contName, resource, allocDevices, resp.ContainerResponses[0])
+		for dev := range allocDevices {
+			if m.allDevices[resource][dev].Topology == nil || len(m.allDevices[resource][dev].Topology.Nodes) == 0 {
+				allocDevicesWithNUMA[0] = append(allocDevicesWithNUMA[0], dev)
+				continue
+			}
+			for idx := range m.allDevices[resource][dev].Topology.Nodes {
+				node := m.allDevices[resource][dev].Topology.Nodes[idx]
+				allocDevicesWithNUMA[node.ID] = append(allocDevicesWithNUMA[node.ID], dev)
+			}
+		}
 		m.mutex.Unlock()
+		m.podDevices.insert(podUID, contName, resource, allocDevicesWithNUMA, resp.ContainerResponses[0])
 	}
 
-	// Checkpoints device to container allocation information.
-	return m.writeCheckpoint()
+	if needsUpdateCheckpoint {
+		return m.writeCheckpoint()
+	}
+
+	return nil
 }
 
 // GetDeviceRunContainerOptions checks whether we have cached containerDevices
@@ -860,9 +940,9 @@ func (m *ManagerImpl) GetDeviceRunContainerOptions(pod *v1.Pod, container *v1.Co
 	podUID := string(pod.UID)
 	contName := container.Name
 	needsReAllocate := false
-	for k := range container.Resources.Limits {
+	for k, v := range container.Resources.Limits {
 		resource := string(k)
-		if !m.isDevicePluginResource(resource) {
+		if !m.isDevicePluginResource(resource) || v.Value() == 0 {
 			continue
 		}
 		err := m.callPreStartContainerIfNeeded(podUID, contName, resource)
@@ -877,13 +957,11 @@ func (m *ManagerImpl) GetDeviceRunContainerOptions(pod *v1.Pod, container *v1.Co
 		}
 	}
 	if needsReAllocate {
-		klog.V(2).Infof("needs re-allocate device plugin resources for pod %s, container %s", podUID, container.Name)
+		klog.V(2).Infof("needs re-allocate device plugin resources for pod %s, container %s", format.Pod(pod), container.Name)
 		if err := m.Allocate(pod, container); err != nil {
 			return nil, err
 		}
 	}
-	m.mutex.Lock()
-	defer m.mutex.Unlock()
 	return m.podDevices.deviceRunContainerOptions(string(pod.UID), container.Name), nil
 }
 
@@ -906,18 +984,44 @@ func (m *ManagerImpl) callPreStartContainerIfNeeded(podUID, contName, resource s
 	devices := m.podDevices.containerDevices(podUID, contName, resource)
 	if devices == nil {
 		m.mutex.Unlock()
-		return fmt.Errorf("no devices found allocated in local cache for pod %s, container %s, resource %s", podUID, contName, resource)
+		return fmt.Errorf("no devices found allocated in local cache for pod %s, container %s, resource %s", string(podUID), contName, resource)
 	}
 
 	m.mutex.Unlock()
 	devs := devices.UnsortedList()
-	klog.V(4).Infof("Issuing an PreStartContainer call for container, %s, of pod %s", contName, podUID)
+	klog.V(4).Infof("Issuing an PreStartContainer call for container, %s, of pod %s", contName, string(podUID))
 	_, err := eI.e.preStartContainer(devs)
 	if err != nil {
 		return fmt.Errorf("device plugin PreStartContainer rpc failed with err: %v", err)
 	}
 	// TODO: Add metrics support for init RPC
 	return nil
+}
+
+// callGetPreferredAllocationIfAvailable issues GetPreferredAllocation grpc
+// call for device plugin resource with GetPreferredAllocationAvailable option set.
+func (m *ManagerImpl) callGetPreferredAllocationIfAvailable(podUID, contName, resource string, available, mustInclude sets.String, size int) (sets.String, error) {
+	eI, ok := m.endpoints[resource]
+	if !ok {
+		return nil, fmt.Errorf("endpoint not found in cache for a registered resource: %s", resource)
+	}
+
+	if eI.opts == nil || !eI.opts.GetPreferredAllocationAvailable {
+		klog.V(4).Infof("Plugin options indicate to skip GetPreferredAllocation for resource: %s", resource)
+		return nil, nil
+	}
+
+	m.mutex.Unlock()
+	klog.V(4).Infof("Issuing a GetPreferredAllocation call for container, %s, of pod %s", contName, string(podUID))
+	resp, err := eI.e.getPreferredAllocation(available.UnsortedList(), mustInclude.UnsortedList(), size)
+	m.mutex.Lock()
+	if err != nil {
+		return nil, fmt.Errorf("device plugin GetPreferredAllocation rpc failed with err: %v", err)
+	}
+	if resp != nil && len(resp.ContainerResponses) > 0 {
+		return sets.NewString(resp.ContainerResponses[0].DeviceIDs...), nil
+	}
+	return sets.NewString(), nil
 }
 
 // sanitizeNodeAllocatable scans through allocatedDevices in the device manager
@@ -930,6 +1034,9 @@ func (m *ManagerImpl) sanitizeNodeAllocatable(node *schedulerframework.NodeInfo)
 	if allocatableResource.ScalarResources == nil {
 		allocatableResource.ScalarResources = make(map[v1.ResourceName]int64)
 	}
+
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
 	for resource, devices := range m.allocatedDevices {
 		needed := devices.Len()
 		quant, ok := allocatableResource.ScalarResources[v1.ResourceName(resource)]
@@ -949,6 +1056,8 @@ func (m *ManagerImpl) sanitizeNodeAllocatable(node *schedulerframework.NodeInfo)
 }
 
 func (m *ManagerImpl) isDevicePluginResource(resource string) bool {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
 	_, registeredResource := m.healthyDevices[resource]
 	_, allocatedResource := m.allocatedDevices[resource]
 	// Return true if this is either an active device plugin resource or
@@ -961,8 +1070,6 @@ func (m *ManagerImpl) isDevicePluginResource(resource string) bool {
 
 // GetDevices returns the devices used by the specified container
 func (m *ManagerImpl) GetDevices(podUID, containerName string) []*podresourcesapi.ContainerDevices {
-	m.mutex.Lock()
-	defer m.mutex.Unlock()
 	return m.podDevices.getContainerDevices(podUID, containerName)
 }
 

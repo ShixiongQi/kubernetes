@@ -27,6 +27,7 @@ import (
 
 	"k8s.io/klog/v2"
 
+	authenticationv1 "k8s.io/api/authentication/v1"
 	api "k8s.io/api/core/v1"
 	storage "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -59,9 +60,11 @@ const (
 )
 
 type csiPlugin struct {
-	host            volume.VolumeHost
-	blockEnabled    bool
-	csiDriverLister storagelisters.CSIDriverLister
+	host                      volume.VolumeHost
+	blockEnabled              bool
+	csiDriverLister           storagelisters.CSIDriverLister
+	serviceAccountTokenGetter func(namespace, name string, tr *authenticationv1.TokenRequest) (*authenticationv1.TokenRequest, error)
+	volumeAttachmentLister    storagelisters.VolumeAttachmentLister
 }
 
 // ProbeVolumePlugins returns implemented plugins
@@ -186,12 +189,16 @@ func (p *csiPlugin) Init(host volume.VolumeHost) error {
 	if csiClient == nil {
 		klog.Warning(log("kubeclient not set, assuming standalone kubelet"))
 	} else {
-		// set CSIDriverLister
+		// set CSIDriverLister and volumeAttachmentLister
 		adcHost, ok := host.(volume.AttachDetachVolumeHost)
 		if ok {
 			p.csiDriverLister = adcHost.CSIDriverLister()
 			if p.csiDriverLister == nil {
 				klog.Error(log("CSIDriverLister not found on AttachDetachVolumeHost"))
+			}
+			p.volumeAttachmentLister = adcHost.VolumeAttachmentLister()
+			if p.volumeAttachmentLister == nil {
+				klog.Error(log("VolumeAttachmentLister not found on AttachDetachVolumeHost"))
 			}
 		}
 		kletHost, ok := host.(volume.KubeletVolumeHost)
@@ -200,6 +207,12 @@ func (p *csiPlugin) Init(host volume.VolumeHost) error {
 			if p.csiDriverLister == nil {
 				klog.Error(log("CSIDriverLister not found on KubeletVolumeHost"))
 			}
+			p.serviceAccountTokenGetter = host.GetServiceAccountTokenFunc()
+			if p.serviceAccountTokenGetter == nil {
+				klog.Error(log("ServiceAccountTokenGetter not found on KubeletVolumeHost"))
+			}
+			// We don't run the volumeAttachmentLister in the kubelet context
+			p.volumeAttachmentLister = nil
 		}
 	}
 
@@ -219,13 +232,15 @@ func (p *csiPlugin) Init(host volume.VolumeHost) error {
 		csitranslationplugins.AzureFileInTreePluginName: func() bool {
 			return utilfeature.DefaultFeatureGate.Enabled(features.CSIMigration) && utilfeature.DefaultFeatureGate.Enabled(features.CSIMigrationAzureFile)
 		},
+		csitranslationplugins.VSphereInTreePluginName: func() bool {
+			return utilfeature.DefaultFeatureGate.Enabled(features.CSIMigration) && utilfeature.DefaultFeatureGate.Enabled(features.CSIMigrationvSphere)
+		},
 	}
 
 	// Initializing the label management channels
 	nim = nodeinfomanager.NewNodeInfoManager(host.GetNodeName(), host, migratedPlugins)
 
-	if utilfeature.DefaultFeatureGate.Enabled(features.CSINodeInfo) &&
-		utilfeature.DefaultFeatureGate.Enabled(features.CSIMigration) {
+	if utilfeature.DefaultFeatureGate.Enabled(features.CSIMigration) {
 		// This function prevents Kubelet from posting Ready status until CSINode
 		// is both installed and initialized
 		if err := initializeCSINode(host); err != nil {
@@ -324,8 +339,24 @@ func (p *csiPlugin) CanSupport(spec *volume.Spec) bool {
 	return spec.PersistentVolume != nil && spec.PersistentVolume.Spec.CSI != nil
 }
 
-func (p *csiPlugin) RequiresRemount() bool {
-	return false
+func (p *csiPlugin) RequiresRemount(spec *volume.Spec) bool {
+	if !utilfeature.DefaultFeatureGate.Enabled(features.CSIServiceAccountToken) {
+		return false
+	}
+	if p.csiDriverLister == nil {
+		return false
+	}
+	driverName, err := GetCSIDriverName(spec)
+	if err != nil {
+		klog.V(5).Info(log("Failed to mark %q as republish required, err: %v", spec.Name(), err))
+		return false
+	}
+	csiDriver, err := p.csiDriverLister.Get(driverName)
+	if err != nil {
+		klog.V(5).Info(log("Failed to mark %q as republish required, err: %v", spec.Name(), err))
+		return false
+	}
+	return *csiDriver.Spec.RequiresRepublish
 }
 
 func (p *csiPlugin) NewMounter(
@@ -370,6 +401,11 @@ func (p *csiPlugin) NewMounter(
 		return nil, err
 	}
 
+	fsGroupPolicy, err := p.getFSGroupPolicy(driverName)
+	if err != nil {
+		return nil, err
+	}
+
 	k8s := p.host.GetKubeClient()
 	if k8s == nil {
 		return nil, errors.New(log("failed to get a kubernetes client"))
@@ -388,6 +424,7 @@ func (p *csiPlugin) NewMounter(
 		podUID:              pod.UID,
 		driverName:          csiDriverName(driverName),
 		volumeLifecycleMode: volumeLifecycleMode,
+		fsGroupPolicy:       fsGroupPolicy,
 		volumeID:            volumeHandle,
 		specVolumeID:        spec.Name(),
 		readOnly:            readOnly,
@@ -821,7 +858,7 @@ func containsVolumeMode(modes []storage.VolumeLifecycleMode, mode storage.Volume
 // getVolumeLifecycleMode returns the mode for the specified spec: {persistent|ephemeral}.
 // 1) If mode cannot be determined, it will default to "persistent".
 // 2) If Mode cannot be resolved to either {persistent | ephemeral}, an error is returned
-// See https://github.com/kubernetes/enhancements/blob/master/keps/sig-storage/20190122-csi-inline-volumes.md
+// See https://github.com/kubernetes/enhancements/blob/master/keps/sig-storage/596-csi-inline-volumes/README.md
 func (p *csiPlugin) getVolumeLifecycleMode(spec *volume.Spec) (storage.VolumeLifecycleMode, error) {
 	// 1) if volume.Spec.Volume.CSI != nil -> mode is ephemeral
 	// 2) if volume.Spec.PersistentVolume.Spec.CSI != nil -> persistent
@@ -834,6 +871,46 @@ func (p *csiPlugin) getVolumeLifecycleMode(spec *volume.Spec) (storage.VolumeLif
 		return storage.VolumeLifecycleEphemeral, nil
 	}
 	return storage.VolumeLifecyclePersistent, nil
+}
+
+// getFSGroupPolicy returns if the CSI driver supports a volume in the given mode.
+// An error indicates that it isn't supported and explains why.
+func (p *csiPlugin) getFSGroupPolicy(driver string) (storage.FSGroupPolicy, error) {
+	if !utilfeature.DefaultFeatureGate.Enabled(features.CSIVolumeFSGroupPolicy) {
+		// feature is disabled, default to ReadWriteOnceWithFSTypeFSGroupPolicy
+		return storage.ReadWriteOnceWithFSTypeFSGroupPolicy, nil
+	}
+
+	// Retrieve CSIDriver. It's not an error if that isn't
+	// possible (we don't have the lister if CSIDriverRegistry is
+	// disabled) or the driver isn't found (CSIDriver is
+	// optional)
+	var csiDriver *storage.CSIDriver
+	if p.csiDriverLister != nil {
+		kletHost, ok := p.host.(volume.KubeletVolumeHost)
+		if ok {
+			if err := kletHost.WaitForCacheSync(); err != nil {
+				return storage.ReadWriteOnceWithFSTypeFSGroupPolicy, err
+			}
+		}
+
+		c, err := p.csiDriverLister.Get(driver)
+		if err != nil && !apierrors.IsNotFound(err) {
+			// Some internal error.
+			return storage.ReadWriteOnceWithFSTypeFSGroupPolicy, err
+		}
+		csiDriver = c
+	}
+
+	// If the csiDriver isn't defined, return the default behavior
+	if csiDriver == nil {
+		return storage.ReadWriteOnceWithFSTypeFSGroupPolicy, nil
+	}
+	// If the csiDriver exists but the fsGroupPolicy isn't defined, return an error
+	if csiDriver.Spec.FSGroupPolicy == nil || *csiDriver.Spec.FSGroupPolicy == "" {
+		return storage.ReadWriteOnceWithFSTypeFSGroupPolicy, errors.New(log("expected valid fsGroupPolicy, received nil value or empty string"))
+	}
+	return *csiDriver.Spec.FSGroupPolicy, nil
 }
 
 func (p *csiPlugin) getPublishContext(client clientset.Interface, handle, driver, nodeName string) (map[string]string, error) {
@@ -867,9 +944,9 @@ func (p *csiPlugin) newAttacherDetacher() (*csiAttacher, error) {
 	}
 
 	return &csiAttacher{
-		plugin:        p,
-		k8s:           k8s,
-		waitSleepTime: 1 * time.Second,
+		plugin:       p,
+		k8s:          k8s,
+		watchTimeout: csiTimeout,
 	}, nil
 }
 

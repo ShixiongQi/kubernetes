@@ -30,13 +30,11 @@ source "${KUBE_ROOT}/hack/lib/init.sh"
 kube::util::ensure_clean_working_dir
 
 _tmpdir="$(kube::realpath "$(mktemp -d -t verify-generated-files.XXXXXX)")"
-kube::util::trap_add "rm -rf ${_tmpdir}" EXIT
-
 _tmp_gopath="${_tmpdir}/go"
 _tmp_kuberoot="${_tmp_gopath}/src/k8s.io/kubernetes"
 mkdir -p "${_tmp_kuberoot}/.."
-cp -a "${KUBE_ROOT}" "${_tmp_kuberoot}/.."
-
+git worktree add "${_tmp_kuberoot}"
+kube::util::trap_add "git worktree remove -f ${_tmp_kuberoot} && rm -rf ${_tmpdir}" EXIT
 cd "${_tmp_kuberoot}"
 
 # clean out anything from the temp dir that's not checked in
@@ -303,7 +301,8 @@ make generated_files >/dev/null
 X="$(newer openapi "${STAMP}")"
 if [[ -z "${X}" || ${X} != "./pkg/generated/openapi/zz_generated.openapi.go
 ./staging/src/k8s.io/apiextensions-apiserver/pkg/generated/openapi/zz_generated.openapi.go
-./staging/src/k8s.io/code-generator/_examples/apiserver/openapi/zz_generated.openapi.go
+./staging/src/k8s.io/code-generator/examples/apiserver/openapi/zz_generated.openapi.go
+./staging/src/k8s.io/kube-aggregator/pkg/generated/openapi/zz_generated.openapi.go
 ./staging/src/k8s.io/sample-apiserver/pkg/generated/openapi/zz_generated.openapi.go" ]]; then
     echo "Wrong generated openapi files changed after touching src file:"
     echo "  ${X:-(none)}" | tr '\n' ' '
@@ -337,7 +336,7 @@ assert_clean
 touch "staging/src/k8s.io/apimachinery/pkg/apis/meta/v1/types.go"
 echo > api/api-rules/violation_exceptions.list
 echo > api/api-rules/codegen_violation_exceptions.list
-if make generated_files >/dev/null; then
+if make generated_files >/dev/null 2>&1; then
     echo "Expected make generated_files to fail with API violations."
     echo ""
     exit 1
@@ -347,7 +346,8 @@ make generated_files UPDATE_API_KNOWN_VIOLATIONS=true >/dev/null
 X="$(newer openapi "${STAMP}")"
 if [[ -z "${X}" || ${X} != "./pkg/generated/openapi/zz_generated.openapi.go
 ./staging/src/k8s.io/apiextensions-apiserver/pkg/generated/openapi/zz_generated.openapi.go
-./staging/src/k8s.io/code-generator/_examples/apiserver/openapi/zz_generated.openapi.go
+./staging/src/k8s.io/code-generator/examples/apiserver/openapi/zz_generated.openapi.go
+./staging/src/k8s.io/kube-aggregator/pkg/generated/openapi/zz_generated.openapi.go
 ./staging/src/k8s.io/sample-apiserver/pkg/generated/openapi/zz_generated.openapi.go" ]]; then
     echo "Wrong generated openapi files changed after updating violation files:"
     echo "  ${X:-(none)}" | tr '\n' ' '

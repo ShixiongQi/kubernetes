@@ -19,10 +19,15 @@ package pod
 import (
 	"strings"
 
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	api "k8s.io/kubernetes/pkg/apis/core"
+	"k8s.io/kubernetes/pkg/apis/core/helper"
+	v1helper "k8s.io/kubernetes/pkg/apis/core/v1/helper"
+	"k8s.io/kubernetes/pkg/apis/core/validation"
+	apivalidation "k8s.io/kubernetes/pkg/apis/core/validation"
 	"k8s.io/kubernetes/pkg/features"
 )
 
@@ -283,6 +288,91 @@ func UpdatePodCondition(status *api.PodStatus, condition *api.PodCondition) bool
 	return !isEqual
 }
 
+// usesHugePagesInProjectedVolume returns true if hugepages are used in downward api for volume
+func usesHugePagesInProjectedVolume(podSpec *api.PodSpec) bool {
+	// determine if any container is using hugepages in downward api volume
+	for _, volumeSource := range podSpec.Volumes {
+		if volumeSource.DownwardAPI != nil {
+			for _, item := range volumeSource.DownwardAPI.Items {
+				if item.ResourceFieldRef != nil {
+					if strings.HasPrefix(item.ResourceFieldRef.Resource, "requests.hugepages-") || strings.HasPrefix(item.ResourceFieldRef.Resource, "limits.hugepages-") {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
+}
+
+// usesHugePagesInProjectedEnv returns true if hugepages are used in downward api for volume
+func usesHugePagesInProjectedEnv(item api.Container) bool {
+	for _, env := range item.Env {
+		if env.ValueFrom != nil {
+			if env.ValueFrom.ResourceFieldRef != nil {
+				if strings.HasPrefix(env.ValueFrom.ResourceFieldRef.Resource, "requests.hugepages-") || strings.HasPrefix(env.ValueFrom.ResourceFieldRef.Resource, "limits.hugepages-") {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// usesMultipleHugePageResources returns true if the pod spec uses more than
+// one size of hugepage
+func usesMultipleHugePageResources(podSpec *api.PodSpec) bool {
+	hugePageResources := sets.NewString()
+	resourceSet := helper.ToPodResourcesSet(podSpec)
+	for resourceStr := range resourceSet {
+		if v1helper.IsHugePageResourceName(v1.ResourceName(resourceStr)) {
+			hugePageResources.Insert(resourceStr)
+		}
+	}
+	return len(hugePageResources) > 1
+}
+
+// GetValidationOptionsFromPodSpec returns validation options based on pod specs
+func GetValidationOptionsFromPodSpec(podSpec, oldPodSpec *api.PodSpec) apivalidation.PodValidationOptions {
+	// default pod validation options based on feature gate
+	opts := validation.PodValidationOptions{
+		// Allow multiple huge pages on pod create if feature is enabled
+		AllowMultipleHugePageResources: utilfeature.DefaultFeatureGate.Enabled(features.HugePageStorageMediumSize),
+		// Allow pod spec to use hugepages in downward API if feature is enabled
+		AllowDownwardAPIHugePages: utilfeature.DefaultFeatureGate.Enabled(features.DownwardAPIHugePages),
+	}
+	// if we are not doing an update operation, just return with default options
+	if oldPodSpec == nil {
+		return opts
+	}
+	// if old spec used multiple huge page sizes, we must allow it
+	opts.AllowMultipleHugePageResources = opts.AllowMultipleHugePageResources || usesMultipleHugePageResources(oldPodSpec)
+	// if old spec used hugepages in downward api, we must allow it
+	opts.AllowDownwardAPIHugePages = opts.AllowDownwardAPIHugePages || usesHugePagesInProjectedVolume(oldPodSpec)
+	// determine if any container is using hugepages in env var
+	if !opts.AllowDownwardAPIHugePages {
+		VisitContainers(oldPodSpec, AllContainers, func(c *api.Container, containerType ContainerType) bool {
+			opts.AllowDownwardAPIHugePages = opts.AllowDownwardAPIHugePages || usesHugePagesInProjectedEnv(*c)
+			return !opts.AllowDownwardAPIHugePages
+		})
+	}
+	return opts
+}
+
+// GetValidationOptionsFromPodTemplate will return pod validation options for specified template.
+func GetValidationOptionsFromPodTemplate(podTemplate, oldPodTemplate *api.PodTemplateSpec) apivalidation.PodValidationOptions {
+	var newPodSpec, oldPodSpec *api.PodSpec
+	// we have to be careful about nil pointers here
+	// replication controller in particular is prone to passing nil
+	if podTemplate != nil {
+		newPodSpec = &podTemplate.Spec
+	}
+	if oldPodTemplate != nil {
+		oldPodSpec = &oldPodTemplate.Spec
+	}
+	return GetValidationOptionsFromPodSpec(newPodSpec, oldPodSpec)
+}
+
 // DropDisabledTemplateFields removes disabled fields from the pod template metadata and spec.
 // This should be called from PrepareForCreate/PrepareForUpdate for all resources containing a PodTemplateSpec
 func DropDisabledTemplateFields(podTemplate, oldPodTemplate *api.PodTemplateSpec) {
@@ -349,18 +439,6 @@ func dropDisabledFields(
 		podSpec = &api.PodSpec{}
 	}
 
-	if !utilfeature.DefaultFeatureGate.Enabled(features.TokenRequestProjection) &&
-		!tokenRequestProjectionInUse(oldPodSpec) {
-		for i := range podSpec.Volumes {
-			if podSpec.Volumes[i].Projected != nil {
-				for j := range podSpec.Volumes[i].Projected.Sources {
-					podSpec.Volumes[i].Projected.Sources[j].ServiceAccountToken = nil
-				}
-			}
-
-		}
-	}
-
 	if !utilfeature.DefaultFeatureGate.Enabled(features.AppArmor) && !appArmorInUse(oldPodAnnotations) {
 		for k := range podAnnotations {
 			if strings.HasPrefix(k, v1.AppArmorBetaContainerAnnotationKeyPrefix) {
@@ -406,22 +484,9 @@ func dropDisabledFields(
 		})
 	}
 
-	if !utilfeature.DefaultFeatureGate.Enabled(features.StartupProbe) && !startupProbeInUse(oldPodSpec) {
-		// drop startupProbe from all containers if the feature is disabled
-		VisitContainers(podSpec, AllContainers, func(c *api.Container, containerType ContainerType) bool {
-			c.StartupProbe = nil
-			return true
-		})
-	}
-
 	dropDisabledRunAsGroupField(podSpec, oldPodSpec)
 
 	dropDisabledFSGroupFields(podSpec, oldPodSpec)
-
-	if !utilfeature.DefaultFeatureGate.Enabled(features.RuntimeClass) && !runtimeClassInUse(oldPodSpec) {
-		// Set RuntimeClassName to nil only if feature is disabled and it is not used
-		podSpec.RuntimeClassName = nil
-	}
 
 	if !utilfeature.DefaultFeatureGate.Enabled(features.PodOverhead) && !overheadInUse(oldPodSpec) {
 		// Set Overhead to nil only if the feature is disabled and it is not used
@@ -431,6 +496,7 @@ func dropDisabledFields(
 	dropDisabledProcMountField(podSpec, oldPodSpec)
 
 	dropDisabledCSIVolumeSourceAlphaFields(podSpec, oldPodSpec)
+	dropDisabledEphemeralVolumeSourceAlphaFields(podSpec, oldPodSpec)
 
 	if !utilfeature.DefaultFeatureGate.Enabled(features.NonPreemptingPriority) &&
 		!podPriorityInUse(oldPodSpec) {
@@ -439,10 +505,11 @@ func dropDisabledFields(
 		podSpec.PreemptionPolicy = nil
 	}
 
-	if !utilfeature.DefaultFeatureGate.Enabled(features.EvenPodsSpread) && !topologySpreadConstraintsInUse(oldPodSpec) {
-		// Set TopologySpreadConstraints to nil only if feature is disabled and it is not used
-		podSpec.TopologySpreadConstraints = nil
+	if !utilfeature.DefaultFeatureGate.Enabled(features.SetHostnameAsFQDN) && !setHostnameAsFQDNInUse(oldPodSpec) {
+		// Set SetHostnameAsFQDN to nil only if feature is disabled and it is not used
+		podSpec.SetHostnameAsFQDN = nil
 	}
+
 }
 
 // dropDisabledRunAsGroupField removes disabled fields from PodSpec related
@@ -498,6 +565,16 @@ func dropDisabledCSIVolumeSourceAlphaFields(podSpec, oldPodSpec *api.PodSpec) {
 	}
 }
 
+// dropDisabledEphemeralVolumeSourceAlphaFields removes disabled alpha fields from []EphemeralVolumeSource.
+// This should be called from PrepareForCreate/PrepareForUpdate for all pod specs resources containing a EphemeralVolumeSource
+func dropDisabledEphemeralVolumeSourceAlphaFields(podSpec, oldPodSpec *api.PodSpec) {
+	if !utilfeature.DefaultFeatureGate.Enabled(features.GenericEphemeralVolume) && !csiInUse(oldPodSpec) {
+		for i := range podSpec.Volumes {
+			podSpec.Volumes[i].Ephemeral = nil
+		}
+	}
+}
+
 func ephemeralContainersInUse(podSpec *api.PodSpec) bool {
 	if podSpec == nil {
 		return false
@@ -536,17 +613,6 @@ func subpathInUse(podSpec *api.PodSpec) bool {
 	return inUse
 }
 
-// runtimeClassInUse returns true if the pod spec is non-nil and has a RuntimeClassName set
-func runtimeClassInUse(podSpec *api.PodSpec) bool {
-	if podSpec == nil {
-		return false
-	}
-	if podSpec.RuntimeClassName != nil {
-		return true
-	}
-	return false
-}
-
 // overheadInUse returns true if the pod spec is non-nil and has Overhead set
 func overheadInUse(podSpec *api.PodSpec) bool {
 	if podSpec == nil {
@@ -556,14 +622,6 @@ func overheadInUse(podSpec *api.PodSpec) bool {
 		return true
 	}
 	return false
-}
-
-// topologySpreadConstraintsInUse returns true if the pod spec is non-nil and has a TopologySpreadConstraints slice
-func topologySpreadConstraintsInUse(podSpec *api.PodSpec) bool {
-	if podSpec == nil {
-		return false
-	}
-	return len(podSpec.TopologySpreadConstraints) > 0
 }
 
 // procMountInUse returns true if the pod spec is non-nil and has a SecurityContext's ProcMount field set to a non-default value
@@ -592,23 +650,6 @@ func appArmorInUse(podAnnotations map[string]string) bool {
 	for k := range podAnnotations {
 		if strings.HasPrefix(k, v1.AppArmorBetaContainerAnnotationKeyPrefix) {
 			return true
-		}
-	}
-	return false
-}
-
-func tokenRequestProjectionInUse(podSpec *api.PodSpec) bool {
-	if podSpec == nil {
-		return false
-	}
-	for _, v := range podSpec.Volumes {
-		if v.Projected == nil {
-			continue
-		}
-		for _, s := range v.Projected.Sources {
-			if s.ServiceAccountToken != nil {
-				return true
-			}
 		}
 	}
 	return false
@@ -692,24 +733,6 @@ func subpathExprInUse(podSpec *api.PodSpec) bool {
 	return inUse
 }
 
-// startupProbeInUse returns true if the pod spec is non-nil and has a container that has a startupProbe defined
-func startupProbeInUse(podSpec *api.PodSpec) bool {
-	if podSpec == nil {
-		return false
-	}
-
-	var inUse bool
-	VisitContainers(podSpec, AllContainers, func(c *api.Container, containerType ContainerType) bool {
-		if c.StartupProbe != nil {
-			inUse = true
-			return false
-		}
-		return true
-	})
-
-	return inUse
-}
-
 // csiInUse returns true if any pod's spec include inline CSI volumes.
 func csiInUse(podSpec *api.PodSpec) bool {
 	if podSpec == nil {
@@ -732,4 +755,67 @@ func multiplePodIPsInUse(podStatus *api.PodStatus) bool {
 		return true
 	}
 	return false
+}
+
+// setHostnameAsFQDNInUse returns true if any pod's spec defines setHostnameAsFQDN field.
+func setHostnameAsFQDNInUse(podSpec *api.PodSpec) bool {
+	if podSpec == nil || podSpec.SetHostnameAsFQDN == nil {
+		return false
+	}
+	return *podSpec.SetHostnameAsFQDN
+}
+
+// SeccompAnnotationForField takes a pod seccomp profile field and returns the
+// converted annotation value
+func SeccompAnnotationForField(field *api.SeccompProfile) string {
+	// If only seccomp fields are specified, add the corresponding annotations.
+	// This ensures that the fields are enforced even if the node version
+	// trails the API version
+	switch field.Type {
+	case api.SeccompProfileTypeUnconfined:
+		return v1.SeccompProfileNameUnconfined
+
+	case api.SeccompProfileTypeRuntimeDefault:
+		return v1.SeccompProfileRuntimeDefault
+
+	case api.SeccompProfileTypeLocalhost:
+		if field.LocalhostProfile != nil {
+			return v1.SeccompLocalhostProfileNamePrefix + *field.LocalhostProfile
+		}
+	}
+
+	// we can only reach this code path if the LocalhostProfile is nil but the
+	// provided field type is SeccompProfileTypeLocalhost or if an unrecognized
+	// type is specified
+	return ""
+}
+
+// SeccompFieldForAnnotation takes a pod annotation and returns the converted
+// seccomp profile field.
+func SeccompFieldForAnnotation(annotation string) *api.SeccompProfile {
+	// If only seccomp annotations are specified, copy the values into the
+	// corresponding fields. This ensures that existing applications continue
+	// to enforce seccomp, and prevents the kubelet from needing to resolve
+	// annotations & fields.
+	if annotation == v1.SeccompProfileNameUnconfined {
+		return &api.SeccompProfile{Type: api.SeccompProfileTypeUnconfined}
+	}
+
+	if annotation == api.SeccompProfileRuntimeDefault || annotation == api.DeprecatedSeccompProfileDockerDefault {
+		return &api.SeccompProfile{Type: api.SeccompProfileTypeRuntimeDefault}
+	}
+
+	if strings.HasPrefix(annotation, v1.SeccompLocalhostProfileNamePrefix) {
+		localhostProfile := strings.TrimPrefix(annotation, v1.SeccompLocalhostProfileNamePrefix)
+		if localhostProfile != "" {
+			return &api.SeccompProfile{
+				Type:             api.SeccompProfileTypeLocalhost,
+				LocalhostProfile: &localhostProfile,
+			}
+		}
+	}
+
+	// we can only reach this code path if the localhostProfile name has a zero
+	// length or if the annotation has an unrecognized value
+	return nil
 }

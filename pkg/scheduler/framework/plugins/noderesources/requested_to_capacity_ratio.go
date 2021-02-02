@@ -23,9 +23,9 @@ import (
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/pkg/scheduler/apis/config"
-	framework "k8s.io/kubernetes/pkg/scheduler/framework/v1alpha1"
+	"k8s.io/kubernetes/pkg/scheduler/apis/config/validation"
+	"k8s.io/kubernetes/pkg/scheduler/framework"
 )
 
 const (
@@ -33,23 +33,25 @@ const (
 	RequestedToCapacityRatioName = "RequestedToCapacityRatio"
 	minUtilization               = 0
 	maxUtilization               = 100
-	minScore                     = 0
-	maxScore                     = framework.MaxNodeScore
 )
 
 type functionShape []functionShapePoint
 
 type functionShapePoint struct {
-	// Utilization is function argument.
+	// utilization is function argument.
 	utilization int64
-	// Score is function value.
+	// score is function value.
 	score int64
 }
 
 // NewRequestedToCapacityRatio initializes a new plugin and returns it.
-func NewRequestedToCapacityRatio(plArgs runtime.Object, handle framework.FrameworkHandle) (framework.Plugin, error) {
+func NewRequestedToCapacityRatio(plArgs runtime.Object, handle framework.Handle) (framework.Plugin, error) {
 	args, err := getRequestedToCapacityRatioArgs(plArgs)
 	if err != nil {
+		return nil, err
+	}
+
+	if err := validation.ValidateRequestedToCapacityRatioArgs(args); err != nil {
 		return nil, err
 	}
 
@@ -64,10 +66,6 @@ func NewRequestedToCapacityRatio(plArgs runtime.Object, handle framework.Framewo
 		})
 	}
 
-	if err := validateFunctionShape(shape); err != nil {
-		return nil, err
-	}
-
 	resourceToWeightMap := make(resourceToWeightMap)
 	for _, resource := range args.Resources {
 		resourceToWeightMap[v1.ResourceName(resource.Name)] = resource.Weight
@@ -75,10 +73,6 @@ func NewRequestedToCapacityRatio(plArgs runtime.Object, handle framework.Framewo
 			// Apply the default weight.
 			resourceToWeightMap[v1.ResourceName(resource.Name)] = 1
 		}
-	}
-	if len(args.Resources) == 0 {
-		// If no resources specified, used the default set.
-		resourceToWeightMap = defaultRequestedRatioResources
 	}
 
 	return &RequestedToCapacityRatio{
@@ -102,7 +96,7 @@ func getRequestedToCapacityRatioArgs(obj runtime.Object) (config.RequestedToCapa
 // RequestedToCapacityRatio is a score plugin that allow users to apply bin packing
 // on core resources like CPU, Memory as well as extended resources like accelerators.
 type RequestedToCapacityRatio struct {
-	handle framework.FrameworkHandle
+	handle framework.Handle
 	resourceAllocationScorer
 }
 
@@ -117,7 +111,7 @@ func (pl *RequestedToCapacityRatio) Name() string {
 func (pl *RequestedToCapacityRatio) Score(ctx context.Context, _ *framework.CycleState, pod *v1.Pod, nodeName string) (int64, *framework.Status) {
 	nodeInfo, err := pl.handle.SnapshotSharedLister().NodeInfos().Get(nodeName)
 	if err != nil {
-		return 0, framework.NewStatus(framework.Error, fmt.Sprintf("getting node %q from Snapshot: %v", nodeName, err))
+		return 0, framework.AsStatus(fmt.Errorf("getting node %q from Snapshot: %w", nodeName, err))
 	}
 	return pl.score(pod, nodeInfo)
 }
@@ -127,54 +121,8 @@ func (pl *RequestedToCapacityRatio) ScoreExtensions() framework.ScoreExtensions 
 	return nil
 }
 
-func validateFunctionShape(shape functionShape) error {
-	if len(shape) == 0 {
-		return fmt.Errorf("at least one point must be specified")
-	}
-
-	for i := 1; i < len(shape); i++ {
-		if shape[i-1].utilization >= shape[i].utilization {
-			return fmt.Errorf("utilization values must be sorted. Utilization[%d]==%d >= Utilization[%d]==%d", i-1, shape[i-1].utilization, i, shape[i].utilization)
-		}
-	}
-
-	for i, point := range shape {
-		if point.utilization < minUtilization {
-			return fmt.Errorf("utilization values must not be less than %d. Utilization[%d]==%d", minUtilization, i, point.utilization)
-		}
-		if point.utilization > maxUtilization {
-			return fmt.Errorf("utilization values must not be greater than %d. Utilization[%d]==%d", maxUtilization, i, point.utilization)
-		}
-		if point.score < minScore {
-			return fmt.Errorf("score values must not be less than %d. Score[%d]==%d", minScore, i, point.score)
-		}
-		if int64(point.score) > maxScore {
-			return fmt.Errorf("score values not be greater than %d. Score[%d]==%d", maxScore, i, point.score)
-		}
-	}
-
-	return nil
-}
-
-func validateResourceWeightMap(resourceToWeightMap resourceToWeightMap) error {
-	if len(resourceToWeightMap) == 0 {
-		return fmt.Errorf("resourceToWeightMap cannot be nil")
-	}
-
-	for resource, weight := range resourceToWeightMap {
-		if weight < 1 {
-			return fmt.Errorf("resource %s weight %d must not be less than 1", string(resource), weight)
-		}
-	}
-	return nil
-}
-
 func buildRequestedToCapacityRatioScorerFunction(scoringFunctionShape functionShape, resourceToWeightMap resourceToWeightMap) func(resourceToValueMap, resourceToValueMap, bool, int, int) int64 {
 	rawScoringFunction := buildBrokenLinearFunction(scoringFunctionShape)
-	err := validateResourceWeightMap(resourceToWeightMap)
-	if err != nil {
-		klog.Error(err)
-	}
 	resourceScoringFunction := func(requested, capacity int64) int64 {
 		if capacity == 0 || requested > capacity {
 			return rawScoringFunction(maxUtilization)

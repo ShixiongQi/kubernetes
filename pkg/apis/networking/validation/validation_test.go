@@ -28,11 +28,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/validation/field"
-	utilfeature "k8s.io/apiserver/pkg/util/feature"
-	featuregatetesting "k8s.io/component-base/featuregate/testing"
 	api "k8s.io/kubernetes/pkg/apis/core"
 	"k8s.io/kubernetes/pkg/apis/networking"
-	"k8s.io/kubernetes/pkg/features"
 	utilpointer "k8s.io/utils/pointer"
 )
 
@@ -41,9 +38,7 @@ func TestValidateNetworkPolicy(t *testing.T) {
 	protocolUDP := api.ProtocolUDP
 	protocolICMP := api.Protocol("ICMP")
 	protocolSCTP := api.ProtocolSCTP
-
-	defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.SCTPSupport, true)()
-
+	endPort := int32(32768)
 	successCases := []networking.NetworkPolicy{
 		{
 			ObjectMeta: metav1.ObjectMeta{Name: "foo", Namespace: "bar"},
@@ -380,6 +375,78 @@ func TestValidateNetworkPolicy(t *testing.T) {
 					},
 				},
 				PolicyTypes: []networking.PolicyType{networking.PolicyTypeIngress, networking.PolicyTypeEgress},
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "foo", Namespace: "bar"},
+			Spec: networking.NetworkPolicySpec{
+				PodSelector: metav1.LabelSelector{
+					MatchLabels: map[string]string{"a": "b"},
+				},
+				Egress: []networking.NetworkPolicyEgressRule{
+					{
+						Ports: []networking.NetworkPolicyPort{
+							{
+								Protocol: nil,
+								Port:     &intstr.IntOrString{Type: intstr.Int, IntVal: 32000},
+								EndPort:  &endPort,
+							},
+							{
+								Protocol: &protocolUDP,
+								Port:     &intstr.IntOrString{Type: intstr.String, StrVal: "dns"},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "foo", Namespace: "bar"},
+			Spec: networking.NetworkPolicySpec{
+				PodSelector: metav1.LabelSelector{
+					MatchLabels: map[string]string{"a": "b"},
+				},
+				Egress: []networking.NetworkPolicyEgressRule{
+					{
+						To: []networking.NetworkPolicyPeer{
+							{
+								NamespaceSelector: &metav1.LabelSelector{
+									MatchLabels: map[string]string{"c": "d"},
+								},
+							},
+						},
+						Ports: []networking.NetworkPolicyPort{
+							{
+								Protocol: nil,
+								Port:     &intstr.IntOrString{Type: intstr.Int, IntVal: 30000},
+								EndPort:  &endPort,
+							},
+							{
+								Protocol: nil,
+								Port:     &intstr.IntOrString{Type: intstr.Int, IntVal: 32000},
+								EndPort:  &endPort,
+							},
+						},
+					},
+				},
+				Ingress: []networking.NetworkPolicyIngressRule{
+					{
+						From: []networking.NetworkPolicyPeer{
+							{
+								PodSelector: &metav1.LabelSelector{
+									MatchLabels: map[string]string{"e": "f"},
+								},
+							},
+						},
+						Ports: []networking.NetworkPolicyPort{
+							{
+								Protocol: &protocolTCP,
+								Port:     &intstr.IntOrString{Type: intstr.Int, IntVal: 32768},
+								EndPort:  &endPort,
+							},
+						},
+					},
+				},
 			},
 		},
 	}
@@ -803,6 +870,154 @@ func TestValidateNetworkPolicy(t *testing.T) {
 				PolicyTypes: []networking.PolicyType{"foo", "bar", "baz"},
 			},
 		},
+		"multiple ports defined, one port range is invalid": {
+			ObjectMeta: metav1.ObjectMeta{Name: "foo", Namespace: "bar"},
+			Spec: networking.NetworkPolicySpec{
+				PodSelector: metav1.LabelSelector{
+					MatchLabels: map[string]string{"a": "b"},
+				},
+				Egress: []networking.NetworkPolicyEgressRule{
+					{
+						To: []networking.NetworkPolicyPeer{
+							{
+								NamespaceSelector: &metav1.LabelSelector{
+									MatchLabels: map[string]string{"c": "d"},
+								},
+							},
+						},
+						Ports: []networking.NetworkPolicyPort{
+							{
+								Protocol: &protocolUDP,
+								Port:     &intstr.IntOrString{Type: intstr.Int, IntVal: 35000},
+								EndPort:  &endPort,
+							},
+							{
+								Protocol: nil,
+								Port:     &intstr.IntOrString{Type: intstr.Int, IntVal: 32000},
+								EndPort:  &endPort,
+							},
+						},
+					},
+				},
+			},
+		},
+		"endPort defined with named/string port": {
+			ObjectMeta: metav1.ObjectMeta{Name: "foo", Namespace: "bar"},
+			Spec: networking.NetworkPolicySpec{
+				PodSelector: metav1.LabelSelector{
+					MatchLabels: map[string]string{"a": "b"},
+				},
+				Egress: []networking.NetworkPolicyEgressRule{
+					{
+						To: []networking.NetworkPolicyPeer{
+							{
+								NamespaceSelector: &metav1.LabelSelector{
+									MatchLabels: map[string]string{"c": "d"},
+								},
+							},
+						},
+						Ports: []networking.NetworkPolicyPort{
+							{
+								Protocol: &protocolUDP,
+								Port:     &intstr.IntOrString{Type: intstr.String, StrVal: "dns"},
+								EndPort:  &endPort,
+							},
+							{
+								Protocol: nil,
+								Port:     &intstr.IntOrString{Type: intstr.Int, IntVal: 32000},
+								EndPort:  &endPort,
+							},
+						},
+					},
+				},
+			},
+		},
+		"endPort defined without port defined": {
+			ObjectMeta: metav1.ObjectMeta{Name: "foo", Namespace: "bar"},
+			Spec: networking.NetworkPolicySpec{
+				PodSelector: metav1.LabelSelector{
+					MatchLabels: map[string]string{"a": "b"},
+				},
+				Egress: []networking.NetworkPolicyEgressRule{
+					{
+						To: []networking.NetworkPolicyPeer{
+							{
+								NamespaceSelector: &metav1.LabelSelector{
+									MatchLabels: map[string]string{"c": "d"},
+								},
+							},
+						},
+						Ports: []networking.NetworkPolicyPort{
+							{
+								Protocol: &protocolTCP,
+								EndPort:  &endPort,
+							},
+						},
+					},
+				},
+			},
+		},
+		"port is greater than endPort": {
+			ObjectMeta: metav1.ObjectMeta{Name: "foo", Namespace: "bar"},
+			Spec: networking.NetworkPolicySpec{
+				PodSelector: metav1.LabelSelector{
+					MatchLabels: map[string]string{"a": "b"},
+				},
+				Egress: []networking.NetworkPolicyEgressRule{
+					{
+						To: []networking.NetworkPolicyPeer{
+							{
+								NamespaceSelector: &metav1.LabelSelector{
+									MatchLabels: map[string]string{"c": "d"},
+								},
+							},
+						},
+						Ports: []networking.NetworkPolicyPort{
+							{
+								Protocol: &protocolSCTP,
+								Port:     &intstr.IntOrString{Type: intstr.Int, IntVal: 33000},
+								EndPort:  &endPort,
+							},
+						},
+					},
+				},
+			},
+		},
+		"multiple invalid port ranges defined": {
+			ObjectMeta: metav1.ObjectMeta{Name: "foo", Namespace: "bar"},
+			Spec: networking.NetworkPolicySpec{
+				PodSelector: metav1.LabelSelector{
+					MatchLabels: map[string]string{"a": "b"},
+				},
+				Egress: []networking.NetworkPolicyEgressRule{
+					{
+						To: []networking.NetworkPolicyPeer{
+							{
+								NamespaceSelector: &metav1.LabelSelector{
+									MatchLabels: map[string]string{"c": "d"},
+								},
+							},
+						},
+						Ports: []networking.NetworkPolicyPort{
+							{
+								Protocol: &protocolUDP,
+								Port:     &intstr.IntOrString{Type: intstr.Int, IntVal: 35000},
+								EndPort:  &endPort,
+							},
+							{
+								Protocol: &protocolTCP,
+								EndPort:  &endPort,
+							},
+							{
+								Protocol: &protocolTCP,
+								Port:     &intstr.IntOrString{Type: intstr.String, StrVal: "https"},
+								EndPort:  &endPort,
+							},
+						},
+					},
+				},
+			},
+		},
 	}
 
 	// Error cases are not expected to pass validation.
@@ -896,9 +1111,15 @@ func TestValidateNetworkPolicyUpdate(t *testing.T) {
 }
 
 func TestValidateIngress(t *testing.T) {
+	serviceBackend := &networking.IngressServiceBackend{
+		Name: "defaultbackend",
+		Port: networking.ServiceBackendPort{
+			Name:   "",
+			Number: 80,
+		},
+	}
 	defaultBackend := networking.IngressBackend{
-		ServiceName: "default-backend",
-		ServicePort: intstr.FromInt(80),
+		Service: serviceBackend,
 	}
 	pathTypePrefix := networking.PathTypePrefix
 	pathTypeImplementationSpecific := networking.PathTypeImplementationSpecific
@@ -910,10 +1131,7 @@ func TestValidateIngress(t *testing.T) {
 			Namespace: metav1.NamespaceDefault,
 		},
 		Spec: networking.IngressSpec{
-			Backend: &networking.IngressBackend{
-				ServiceName: "default-backend",
-				ServicePort: intstr.FromInt(80),
-			},
+			DefaultBackend: &defaultBackend,
 			Rules: []networking.IngressRule{
 				{
 					Host: "foo.bar.com",
@@ -961,7 +1179,7 @@ func TestValidateIngress(t *testing.T) {
 		"backend (v1beta1) with no service": {
 			groupVersion: &networkingv1beta1.SchemeGroupVersion,
 			tweakIngress: func(ing *networking.Ingress) {
-				ing.Spec.Backend.ServiceName = ""
+				ing.Spec.DefaultBackend.Service.Name = ""
 			},
 			expectErrsOnFields: []string{
 				"spec.backend.serviceName",
@@ -1039,7 +1257,7 @@ func TestValidateIngress(t *testing.T) {
 								Path:     "/foo",
 								PathType: &pathTypeImplementationSpecific,
 								Backend: networking.IngressBackend{
-									ServiceName: "default-backend",
+									Service: serviceBackend,
 									Resource: &api.TypedLocalObjectReference{
 										APIGroup: utilpointer.StringPtr("example.com"),
 										Kind:     "foo",
@@ -1064,7 +1282,7 @@ func TestValidateIngress(t *testing.T) {
 								Path:     "/foo",
 								PathType: &pathTypeImplementationSpecific,
 								Backend: networking.IngressBackend{
-									ServicePort: intstr.FromInt(80),
+									Service: serviceBackend,
 									Resource: &api.TypedLocalObjectReference{
 										APIGroup: utilpointer.StringPtr("example.com"),
 										Kind:     "foo",
@@ -1083,8 +1301,8 @@ func TestValidateIngress(t *testing.T) {
 		"spec.backend resource and service name are not allowed together": {
 			groupVersion: &networkingv1beta1.SchemeGroupVersion,
 			tweakIngress: func(ing *networking.Ingress) {
-				ing.Spec.Backend = &networking.IngressBackend{
-					ServiceName: "default-backend",
+				ing.Spec.DefaultBackend = &networking.IngressBackend{
+					Service: serviceBackend,
 					Resource: &api.TypedLocalObjectReference{
 						APIGroup: utilpointer.StringPtr("example.com"),
 						Kind:     "foo",
@@ -1099,8 +1317,8 @@ func TestValidateIngress(t *testing.T) {
 		"spec.backend resource and service port are not allowed together": {
 			groupVersion: &networkingv1beta1.SchemeGroupVersion,
 			tweakIngress: func(ing *networking.Ingress) {
-				ing.Spec.Backend = &networking.IngressBackend{
-					ServicePort: intstr.FromInt(80),
+				ing.Spec.DefaultBackend = &networking.IngressBackend{
+					Service: serviceBackend,
 					Resource: &api.TypedLocalObjectReference{
 						APIGroup: utilpointer.StringPtr("example.com"),
 						Kind:     "foo",
@@ -1136,8 +1354,16 @@ func TestValidateIngress(t *testing.T) {
 }
 
 func TestValidateIngressRuleValue(t *testing.T) {
+	serviceBackend := networking.IngressServiceBackend{
+		Name: "defaultbackend",
+		Port: networking.ServiceBackendPort{
+			Name:   "",
+			Number: 80,
+		},
+	}
 	fldPath := field.NewPath("testing.http.paths[0].path")
 	testCases := map[string]struct {
+		groupVersion *schema.GroupVersion
 		pathType     networking.PathType
 		path         string
 		expectedErrs field.ErrorList
@@ -1233,16 +1459,17 @@ func TestValidateIngressRuleValue(t *testing.T) {
 							Path:     testCase.path,
 							PathType: &testCase.pathType,
 							Backend: networking.IngressBackend{
-								ServiceName: "default-backend",
-								ServicePort: intstr.FromInt(80),
+								Service: &serviceBackend,
 							},
 						},
 					},
 				},
 			}
-
-			errs := validateIngressRuleValue(irv, field.NewPath("testing"), IngressValidationOptions{})
-
+			gv := testCase.groupVersion
+			if gv == nil {
+				gv = &networkingv1.SchemeGroupVersion
+			}
+			errs := validateIngressRuleValue(irv, field.NewPath("testing"), IngressValidationOptions{}, *gv)
 			if len(errs) != len(testCase.expectedErrs) {
 				t.Fatalf("Expected %d errors, got %d (%+v)", len(testCase.expectedErrs), len(errs), errs)
 			}
@@ -1258,9 +1485,15 @@ func TestValidateIngressRuleValue(t *testing.T) {
 
 func TestValidateIngressCreate(t *testing.T) {
 	implementationPathType := networking.PathTypeImplementationSpecific
+	exactPathType := networking.PathTypeExact
+	serviceBackend := &networking.IngressServiceBackend{
+		Name: "defaultbackend",
+		Port: networking.ServiceBackendPort{
+			Number: 80,
+		},
+	}
 	defaultBackend := networking.IngressBackend{
-		ServiceName: "default-backend",
-		ServicePort: intstr.FromInt(80),
+		Service: serviceBackend,
 	}
 	resourceBackend := &api.TypedLocalObjectReference{
 		APIGroup: utilpointer.StringPtr("example.com"),
@@ -1274,12 +1507,13 @@ func TestValidateIngressCreate(t *testing.T) {
 			ResourceVersion: "1234",
 		},
 		Spec: networking.IngressSpec{
-			Backend: &defaultBackend,
-			Rules:   []networking.IngressRule{},
+			DefaultBackend: &defaultBackend,
+			Rules:          []networking.IngressRule{},
 		},
 	}
 
 	testCases := map[string]struct {
+		groupVersion *schema.GroupVersion
 		tweakIngress func(ingress *networking.Ingress)
 		expectedErrs field.ErrorList
 	}{
@@ -1319,7 +1553,7 @@ func TestValidateIngressCreate(t *testing.T) {
 			},
 			expectedErrs: field.ErrorList{},
 		},
-		"invalid regex path": {
+		"invalid regex path allowed (v1)": {
 			tweakIngress: func(ingress *networking.Ingress) {
 				ingress.Spec.Rules = []networking.IngressRule{{
 					Host: "foo.bar.com",
@@ -1338,7 +1572,7 @@ func TestValidateIngressCreate(t *testing.T) {
 		},
 		"Spec.Backend.Resource field allowed on create": {
 			tweakIngress: func(ingress *networking.Ingress) {
-				ingress.Spec.Backend = &networking.IngressBackend{
+				ingress.Spec.DefaultBackend = &networking.IngressBackend{
 					Resource: resourceBackend}
 			},
 			expectedErrs: field.ErrorList{},
@@ -1361,14 +1595,115 @@ func TestValidateIngressCreate(t *testing.T) {
 			},
 			expectedErrs: field.ErrorList{},
 		},
+		"v1: valid secret": {
+			groupVersion: &networkingv1.SchemeGroupVersion,
+			tweakIngress: func(ingress *networking.Ingress) {
+				ingress.Spec.TLS = []networking.IngressTLS{{SecretName: "valid"}}
+			},
+		},
+		"v1: invalid secret": {
+			groupVersion: &networkingv1.SchemeGroupVersion,
+			tweakIngress: func(ingress *networking.Ingress) {
+				ingress.Spec.TLS = []networking.IngressTLS{{SecretName: "invalid name"}}
+			},
+			expectedErrs: field.ErrorList{field.Invalid(field.NewPath("spec").Child("tls").Index(0).Child("secretName"), "invalid name", `a lowercase RFC 1123 subdomain must consist of lower case alphanumeric characters, '-' or '.', and must start and end with an alphanumeric character (e.g. 'example.com', regex used for validation is '[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*')`)},
+		},
+		"v1beta1: valid secret": {
+			groupVersion: &networkingv1beta1.SchemeGroupVersion,
+			tweakIngress: func(ingress *networking.Ingress) {
+				ingress.Spec.TLS = []networking.IngressTLS{{SecretName: "valid"}}
+			},
+		},
+		"v1beta1: invalid secret": {
+			groupVersion: &networkingv1beta1.SchemeGroupVersion,
+			tweakIngress: func(ingress *networking.Ingress) {
+				ingress.Spec.TLS = []networking.IngressTLS{{SecretName: "invalid name 1"}}
+			},
+		},
+		"v1: valid rules with wildcard host": {
+			groupVersion: &networkingv1.SchemeGroupVersion,
+			tweakIngress: func(ingress *networking.Ingress) {
+				ingress.Spec.TLS = []networking.IngressTLS{{Hosts: []string{"*.bar.com"}}}
+				ingress.Spec.Rules = []networking.IngressRule{{
+					Host: "*.foo.com",
+					IngressRuleValue: networking.IngressRuleValue{
+						HTTP: &networking.HTTPIngressRuleValue{
+							Paths: []networking.HTTPIngressPath{{
+								Path:     "/foo",
+								PathType: &exactPathType,
+								Backend:  defaultBackend,
+							}},
+						},
+					},
+				}}
+			},
+		},
+		"v1: invalid rules with wildcard host": {
+			groupVersion: &networkingv1.SchemeGroupVersion,
+			tweakIngress: func(ingress *networking.Ingress) {
+				ingress.Spec.TLS = []networking.IngressTLS{{Hosts: []string{"*.bar.com"}}}
+				ingress.Spec.Rules = []networking.IngressRule{{
+					Host: "*.foo.com",
+					IngressRuleValue: networking.IngressRuleValue{
+						HTTP: &networking.HTTPIngressRuleValue{
+							Paths: []networking.HTTPIngressPath{{
+								Path:     "foo",
+								PathType: &exactPathType,
+								Backend:  defaultBackend,
+							}},
+						},
+					},
+				}}
+			},
+			expectedErrs: field.ErrorList{field.Invalid(field.NewPath("spec").Child("rules").Index(0).Child("http").Child("paths").Index(0).Child("path"), "foo", `must be an absolute path`)},
+		},
+		"v1beta1: valid rules with wildcard host": {
+			groupVersion: &networkingv1beta1.SchemeGroupVersion,
+			tweakIngress: func(ingress *networking.Ingress) {
+				ingress.Spec.TLS = []networking.IngressTLS{{Hosts: []string{"*.bar.com"}}}
+				ingress.Spec.Rules = []networking.IngressRule{{
+					Host: "*.foo.com",
+					IngressRuleValue: networking.IngressRuleValue{
+						HTTP: &networking.HTTPIngressRuleValue{
+							Paths: []networking.HTTPIngressPath{{
+								Path:     "/foo",
+								PathType: &exactPathType,
+								Backend:  defaultBackend,
+							}},
+						},
+					},
+				}}
+			},
+		},
+		"v1beta1: invalid rules with wildcard host": {
+			groupVersion: &networkingv1beta1.SchemeGroupVersion,
+			tweakIngress: func(ingress *networking.Ingress) {
+				ingress.Spec.TLS = []networking.IngressTLS{{Hosts: []string{"*.bar.com"}}}
+				ingress.Spec.Rules = []networking.IngressRule{{
+					Host: "*.foo.com",
+					IngressRuleValue: networking.IngressRuleValue{
+						HTTP: &networking.HTTPIngressRuleValue{
+							Paths: []networking.HTTPIngressPath{{
+								Path:     "foo",
+								PathType: &exactPathType,
+								Backend:  defaultBackend,
+							}},
+						},
+					},
+				}}
+			},
+		},
 	}
 
 	for name, testCase := range testCases {
 		t.Run(name, func(t *testing.T) {
 			newIngress := baseIngress.DeepCopy()
 			testCase.tweakIngress(newIngress)
-
-			errs := ValidateIngressCreate(newIngress, networkingv1beta1.SchemeGroupVersion)
+			gv := testCase.groupVersion
+			if gv == nil {
+				gv = &networkingv1.SchemeGroupVersion
+			}
+			errs := ValidateIngressCreate(newIngress, *gv)
 			if len(errs) != len(testCase.expectedErrs) {
 				t.Fatalf("Expected %d errors, got %d (%+v)", len(testCase.expectedErrs), len(errs), errs)
 			}
@@ -1384,9 +1719,15 @@ func TestValidateIngressCreate(t *testing.T) {
 
 func TestValidateIngressUpdate(t *testing.T) {
 	implementationPathType := networking.PathTypeImplementationSpecific
+	exactPathType := networking.PathTypeExact
+	serviceBackend := &networking.IngressServiceBackend{
+		Name: "defaultbackend",
+		Port: networking.ServiceBackendPort{
+			Number: 80,
+		},
+	}
 	defaultBackend := networking.IngressBackend{
-		ServiceName: "default-backend",
-		ServicePort: intstr.FromInt(80),
+		Service: serviceBackend,
 	}
 	resourceBackend := &api.TypedLocalObjectReference{
 		APIGroup: utilpointer.StringPtr("example.com"),
@@ -1400,11 +1741,12 @@ func TestValidateIngressUpdate(t *testing.T) {
 			ResourceVersion: "1234",
 		},
 		Spec: networking.IngressSpec{
-			Backend: &defaultBackend,
+			DefaultBackend: &defaultBackend,
 		},
 	}
 
 	testCases := map[string]struct {
+		gv             schema.GroupVersion
 		tweakIngresses func(newIngress, oldIngress *networking.Ingress)
 		expectedErrs   field.ErrorList
 	}{
@@ -1545,26 +1887,26 @@ func TestValidateIngressUpdate(t *testing.T) {
 		},
 		"new Backend.Resource allowed on update": {
 			tweakIngresses: func(newIngress, oldIngress *networking.Ingress) {
-				oldIngress.Spec.Backend = &defaultBackend
-				newIngress.Spec.Backend = &networking.IngressBackend{
+				oldIngress.Spec.DefaultBackend = &defaultBackend
+				newIngress.Spec.DefaultBackend = &networking.IngressBackend{
 					Resource: resourceBackend}
 			},
 			expectedErrs: field.ErrorList{},
 		},
-		"old Backend.Resource allowed on update": {
+		"old DefaultBackend.Resource allowed on update": {
 			tweakIngresses: func(newIngress, oldIngress *networking.Ingress) {
-				oldIngress.Spec.Backend = &networking.IngressBackend{
+				oldIngress.Spec.DefaultBackend = &networking.IngressBackend{
 					Resource: resourceBackend}
-				newIngress.Spec.Backend = &networking.IngressBackend{
+				newIngress.Spec.DefaultBackend = &networking.IngressBackend{
 					Resource: resourceBackend}
 			},
 			expectedErrs: field.ErrorList{},
 		},
 		"changing spec.backend from resource -> no resource": {
 			tweakIngresses: func(newIngress, oldIngress *networking.Ingress) {
-				oldIngress.Spec.Backend = &networking.IngressBackend{
+				oldIngress.Spec.DefaultBackend = &networking.IngressBackend{
 					Resource: resourceBackend}
-				newIngress.Spec.Backend = &defaultBackend
+				newIngress.Spec.DefaultBackend = &defaultBackend
 			},
 			expectedErrs: field.ErrorList{},
 		},
@@ -1688,6 +2030,160 @@ func TestValidateIngressUpdate(t *testing.T) {
 			},
 			expectedErrs: field.ErrorList{},
 		},
+		"v1: change valid secret -> invalid secret": {
+			gv: networkingv1.SchemeGroupVersion,
+			tweakIngresses: func(newIngress, oldIngress *networking.Ingress) {
+				oldIngress.Spec.TLS = []networking.IngressTLS{{SecretName: "valid"}}
+				newIngress.Spec.TLS = []networking.IngressTLS{{SecretName: "invalid name"}}
+			},
+			expectedErrs: field.ErrorList{field.Invalid(field.NewPath("spec").Child("tls").Index(0).Child("secretName"), "invalid name", `a lowercase RFC 1123 subdomain must consist of lower case alphanumeric characters, '-' or '.', and must start and end with an alphanumeric character (e.g. 'example.com', regex used for validation is '[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*')`)},
+		},
+		"v1: change invalid secret -> invalid secret": {
+			gv: networkingv1.SchemeGroupVersion,
+			tweakIngresses: func(newIngress, oldIngress *networking.Ingress) {
+				oldIngress.Spec.TLS = []networking.IngressTLS{{SecretName: "invalid name 1"}}
+				newIngress.Spec.TLS = []networking.IngressTLS{{SecretName: "invalid name 2"}}
+			},
+		},
+		"v1beta1: change valid secret -> invalid secret": {
+			gv: networkingv1beta1.SchemeGroupVersion,
+			tweakIngresses: func(newIngress, oldIngress *networking.Ingress) {
+				oldIngress.Spec.TLS = []networking.IngressTLS{{SecretName: "valid"}}
+				newIngress.Spec.TLS = []networking.IngressTLS{{SecretName: "invalid name"}}
+			},
+		},
+		"v1beta1: change invalid secret -> invalid secret": {
+			gv: networkingv1beta1.SchemeGroupVersion,
+			tweakIngresses: func(newIngress, oldIngress *networking.Ingress) {
+				oldIngress.Spec.TLS = []networking.IngressTLS{{SecretName: "invalid name 1"}}
+				newIngress.Spec.TLS = []networking.IngressTLS{{SecretName: "invalid name 2"}}
+			},
+		},
+		"v1: change valid rules with wildcard host -> invalid rules": {
+			gv: networkingv1.SchemeGroupVersion,
+			tweakIngresses: func(newIngress, oldIngress *networking.Ingress) {
+				oldIngress.Spec.TLS = []networking.IngressTLS{{Hosts: []string{"*.bar.com"}}}
+				oldIngress.Spec.Rules = []networking.IngressRule{{
+					Host: "*.foo.com",
+					IngressRuleValue: networking.IngressRuleValue{
+						HTTP: &networking.HTTPIngressRuleValue{
+							Paths: []networking.HTTPIngressPath{{
+								Path:     "/foo",
+								PathType: &exactPathType,
+								Backend:  defaultBackend,
+							}},
+						},
+					},
+				}}
+				newIngress.Spec.TLS = []networking.IngressTLS{{Hosts: []string{"*.bar.com"}}}
+				newIngress.Spec.Rules = []networking.IngressRule{{
+					Host: "*.foo.com",
+					IngressRuleValue: networking.IngressRuleValue{
+						HTTP: &networking.HTTPIngressRuleValue{
+							Paths: []networking.HTTPIngressPath{{
+								Path:     "foo",
+								PathType: &exactPathType,
+								Backend:  defaultBackend,
+							}},
+						},
+					},
+				}}
+			},
+			expectedErrs: field.ErrorList{field.Invalid(field.NewPath("spec").Child("rules").Index(0).Child("http").Child("paths").Index(0).Child("path"), "foo", `must be an absolute path`)},
+		},
+		"v1: change invalid rules with wildcard host -> invalid rules": {
+			gv: networkingv1.SchemeGroupVersion,
+			tweakIngresses: func(newIngress, oldIngress *networking.Ingress) {
+				oldIngress.Spec.TLS = []networking.IngressTLS{{Hosts: []string{"*.bar.com"}}}
+				oldIngress.Spec.Rules = []networking.IngressRule{{
+					Host: "*.foo.com",
+					IngressRuleValue: networking.IngressRuleValue{
+						HTTP: &networking.HTTPIngressRuleValue{
+							Paths: []networking.HTTPIngressPath{{
+								Path:     "foo",
+								PathType: &exactPathType,
+								Backend:  defaultBackend,
+							}},
+						},
+					},
+				}}
+				newIngress.Spec.TLS = []networking.IngressTLS{{Hosts: []string{"*.bar.com"}}}
+				newIngress.Spec.Rules = []networking.IngressRule{{
+					Host: "*.foo.com",
+					IngressRuleValue: networking.IngressRuleValue{
+						HTTP: &networking.HTTPIngressRuleValue{
+							Paths: []networking.HTTPIngressPath{{
+								Path:     "bar",
+								PathType: &exactPathType,
+								Backend:  defaultBackend,
+							}},
+						},
+					},
+				}}
+			},
+		},
+		"v1beta1: change valid rules with wildcard host -> invalid rules": {
+			gv: networkingv1beta1.SchemeGroupVersion,
+			tweakIngresses: func(newIngress, oldIngress *networking.Ingress) {
+				oldIngress.Spec.TLS = []networking.IngressTLS{{Hosts: []string{"*.bar.com"}}}
+				oldIngress.Spec.Rules = []networking.IngressRule{{
+					Host: "*.foo.com",
+					IngressRuleValue: networking.IngressRuleValue{
+						HTTP: &networking.HTTPIngressRuleValue{
+							Paths: []networking.HTTPIngressPath{{
+								Path:     "/foo",
+								PathType: &exactPathType,
+								Backend:  defaultBackend,
+							}},
+						},
+					},
+				}}
+				newIngress.Spec.TLS = []networking.IngressTLS{{Hosts: []string{"*.bar.com"}}}
+				newIngress.Spec.Rules = []networking.IngressRule{{
+					Host: "*.foo.com",
+					IngressRuleValue: networking.IngressRuleValue{
+						HTTP: &networking.HTTPIngressRuleValue{
+							Paths: []networking.HTTPIngressPath{{
+								Path:     "foo",
+								PathType: &exactPathType,
+								Backend:  defaultBackend,
+							}},
+						},
+					},
+				}}
+			},
+		},
+		"v1beta1: change invalid rules with wildcard host -> invalid rules": {
+			gv: networkingv1beta1.SchemeGroupVersion,
+			tweakIngresses: func(newIngress, oldIngress *networking.Ingress) {
+				oldIngress.Spec.TLS = []networking.IngressTLS{{Hosts: []string{"*.bar.com"}}}
+				oldIngress.Spec.Rules = []networking.IngressRule{{
+					Host: "*.foo.com",
+					IngressRuleValue: networking.IngressRuleValue{
+						HTTP: &networking.HTTPIngressRuleValue{
+							Paths: []networking.HTTPIngressPath{{
+								Path:     "foo",
+								PathType: &exactPathType,
+								Backend:  defaultBackend,
+							}},
+						},
+					},
+				}}
+				newIngress.Spec.TLS = []networking.IngressTLS{{Hosts: []string{"*.bar.com"}}}
+				newIngress.Spec.Rules = []networking.IngressRule{{
+					Host: "*.foo.com",
+					IngressRuleValue: networking.IngressRuleValue{
+						HTTP: &networking.HTTPIngressRuleValue{
+							Paths: []networking.HTTPIngressPath{{
+								Path:     "bar",
+								PathType: &exactPathType,
+								Backend:  defaultBackend,
+							}},
+						},
+					},
+				}}
+			},
+		},
 	}
 
 	for name, testCase := range testCases {
@@ -1696,7 +2192,11 @@ func TestValidateIngressUpdate(t *testing.T) {
 			oldIngress := baseIngress.DeepCopy()
 			testCase.tweakIngresses(newIngress, oldIngress)
 
-			errs := ValidateIngressUpdate(newIngress, oldIngress, networkingv1beta1.SchemeGroupVersion)
+			gv := testCase.gv
+			if gv.Empty() {
+				gv = networkingv1beta1.SchemeGroupVersion
+			}
+			errs := ValidateIngressUpdate(newIngress, oldIngress, gv)
 
 			if len(errs) != len(testCase.expectedErrs) {
 				t.Fatalf("Expected %d errors, got %d (%+v)", len(testCase.expectedErrs), len(errs), errs)
@@ -1732,7 +2232,7 @@ func TestValidateIngressClass(t *testing.T) {
 					Controller: "foo.co/bar",
 				},
 			},
-			expectedErrs: field.ErrorList{field.Invalid(field.NewPath("metadata.name"), "test*123", "a DNS-1123 subdomain must consist of lower case alphanumeric characters, '-' or '.', and must start and end with an alphanumeric character (e.g. 'example.com', regex used for validation is '[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*')")},
+			expectedErrs: field.ErrorList{field.Invalid(field.NewPath("metadata.name"), "test*123", "a lowercase RFC 1123 subdomain must consist of lower case alphanumeric characters, '-' or '.', and must start and end with an alphanumeric character (e.g. 'example.com', regex used for validation is '[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*')")},
 		},
 		"valid name, empty controller": {
 			ingressClass: networking.IngressClass{
@@ -1899,11 +2399,16 @@ func TestValidateIngressClassUpdate(t *testing.T) {
 }
 
 func TestValidateIngressTLS(t *testing.T) {
-	defaultBackend := networking.IngressBackend{
-		ServiceName: "default-backend",
-		ServicePort: intstr.FromInt(80),
+	pathTypeImplementationSpecific := networking.PathTypeImplementationSpecific
+	serviceBackend := &networking.IngressServiceBackend{
+		Name: "defaultbackend",
+		Port: networking.ServiceBackendPort{
+			Number: 80,
+		},
 	}
-
+	defaultBackend := networking.IngressBackend{
+		Service: serviceBackend,
+	}
 	newValid := func() networking.Ingress {
 		return networking.Ingress{
 			ObjectMeta: metav1.ObjectMeta{
@@ -1911,10 +2416,7 @@ func TestValidateIngressTLS(t *testing.T) {
 				Namespace: metav1.NamespaceDefault,
 			},
 			Spec: networking.IngressSpec{
-				Backend: &networking.IngressBackend{
-					ServiceName: "default-backend",
-					ServicePort: intstr.FromInt(80),
-				},
+				DefaultBackend: &defaultBackend,
 				Rules: []networking.IngressRule{
 					{
 						Host: "foo.bar.com",
@@ -1922,8 +2424,9 @@ func TestValidateIngressTLS(t *testing.T) {
 							HTTP: &networking.HTTPIngressRuleValue{
 								Paths: []networking.HTTPIngressPath{
 									{
-										Path:    "/foo",
-										Backend: defaultBackend,
+										Path:     "/foo",
+										PathType: &pathTypeImplementationSpecific,
+										Backend:  defaultBackend,
 									},
 								},
 							},
@@ -1951,7 +2454,7 @@ func TestValidateIngressTLS(t *testing.T) {
 			Hosts: []string{wildcardHost},
 		},
 	}
-	badWildcardTLSErr := fmt.Sprintf("spec.tls[0].hosts: Invalid value: '%v'", wildcardHost)
+	badWildcardTLSErr := fmt.Sprintf("spec.tls[0].hosts[0]: Invalid value: '%v'", wildcardHost)
 	errorCases[badWildcardTLSErr] = badWildcardTLS
 
 	for k, v := range errorCases {
@@ -1986,10 +2489,76 @@ func TestValidateIngressTLS(t *testing.T) {
 	}
 }
 
-func TestValidateIngressStatusUpdate(t *testing.T) {
+// TestValidateEmptyIngressTLS verifies that an empty TLS configuration can be
+// specified, which ingress controllers may interpret to mean that TLS should be
+// used with a default certificate that the ingress controller furnishes.
+func TestValidateEmptyIngressTLS(t *testing.T) {
+	pathTypeImplementationSpecific := networking.PathTypeImplementationSpecific
+	serviceBackend := &networking.IngressServiceBackend{
+		Name: "defaultbackend",
+		Port: networking.ServiceBackendPort{
+			Number: 443,
+		},
+	}
 	defaultBackend := networking.IngressBackend{
-		ServiceName: "default-backend",
-		ServicePort: intstr.FromInt(80),
+		Service: serviceBackend,
+	}
+	newValid := func() networking.Ingress {
+		return networking.Ingress{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "foo",
+				Namespace: metav1.NamespaceDefault,
+			},
+			Spec: networking.IngressSpec{
+				Rules: []networking.IngressRule{
+					{
+						Host: "foo.bar.com",
+						IngressRuleValue: networking.IngressRuleValue{
+							HTTP: &networking.HTTPIngressRuleValue{
+								Paths: []networking.HTTPIngressPath{
+									{
+										PathType: &pathTypeImplementationSpecific,
+										Backend:  defaultBackend,
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+	}
+
+	validCases := map[string]networking.Ingress{}
+	goodEmptyTLS := newValid()
+	goodEmptyTLS.Spec.TLS = []networking.IngressTLS{
+		{},
+	}
+	validCases[fmt.Sprintf("spec.tls[0]: Valid value: %v", goodEmptyTLS.Spec.TLS[0])] = goodEmptyTLS
+	goodEmptyHosts := newValid()
+	goodEmptyHosts.Spec.TLS = []networking.IngressTLS{
+		{
+			Hosts: []string{},
+		},
+	}
+	validCases[fmt.Sprintf("spec.tls[0]: Valid value: %v", goodEmptyHosts.Spec.TLS[0])] = goodEmptyHosts
+	for k, v := range validCases {
+		errs := validateIngress(&v, IngressValidationOptions{}, networkingv1beta1.SchemeGroupVersion)
+		if len(errs) != 0 {
+			t.Errorf("expected success for %q", k)
+		}
+	}
+}
+
+func TestValidateIngressStatusUpdate(t *testing.T) {
+	serviceBackend := &networking.IngressServiceBackend{
+		Name: "defaultbackend",
+		Port: networking.ServiceBackendPort{
+			Number: 80,
+		},
+	}
+	defaultBackend := networking.IngressBackend{
+		Service: serviceBackend,
 	}
 
 	newValid := func() networking.Ingress {
@@ -2000,10 +2569,7 @@ func TestValidateIngressStatusUpdate(t *testing.T) {
 				ResourceVersion: "9",
 			},
 			Spec: networking.IngressSpec{
-				Backend: &networking.IngressBackend{
-					ServiceName: "default-backend",
-					ServicePort: intstr.FromInt(80),
-				},
+				DefaultBackend: &defaultBackend,
 				Rules: []networking.IngressRule{
 					{
 						Host: "foo.bar.com",

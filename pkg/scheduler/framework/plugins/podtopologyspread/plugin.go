@@ -20,34 +20,43 @@ import (
 	"fmt"
 
 	v1 "k8s.io/api/core/v1"
-	metav1validation "k8s.io/apimachinery/pkg/apis/meta/v1/validation"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/client-go/informers"
 	appslisters "k8s.io/client-go/listers/apps/v1"
 	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/kubernetes/pkg/scheduler/apis/config"
-	framework "k8s.io/kubernetes/pkg/scheduler/framework/v1alpha1"
+	"k8s.io/kubernetes/pkg/scheduler/apis/config/validation"
+	"k8s.io/kubernetes/pkg/scheduler/framework"
 )
 
 const (
 	// ErrReasonConstraintsNotMatch is used for PodTopologySpread filter error.
 	ErrReasonConstraintsNotMatch = "node(s) didn't match pod topology spread constraints"
+	// ErrReasonNodeLabelNotMatch is used when the node doesn't hold the required label.
+	ErrReasonNodeLabelNotMatch = ErrReasonConstraintsNotMatch + " (missing required label)"
 )
 
-var (
-	supportedScheduleActions = sets.NewString(string(v1.DoNotSchedule), string(v1.ScheduleAnyway))
-)
+var systemDefaultConstraints = []v1.TopologySpreadConstraint{
+	{
+		TopologyKey:       v1.LabelHostname,
+		WhenUnsatisfiable: v1.ScheduleAnyway,
+		MaxSkew:           3,
+	},
+	{
+		TopologyKey:       v1.LabelTopologyZone,
+		WhenUnsatisfiable: v1.ScheduleAnyway,
+		MaxSkew:           5,
+	},
+}
 
 // PodTopologySpread is a plugin that ensures pod's topologySpreadConstraints is satisfied.
 type PodTopologySpread struct {
-	args             config.PodTopologySpreadArgs
-	sharedLister     framework.SharedLister
-	services         corelisters.ServiceLister
-	replicationCtrls corelisters.ReplicationControllerLister
-	replicaSets      appslisters.ReplicaSetLister
-	statefulSets     appslisters.StatefulSetLister
+	defaultConstraints []v1.TopologySpreadConstraint
+	sharedLister       framework.SharedLister
+	services           corelisters.ServiceLister
+	replicationCtrls   corelisters.ReplicationControllerLister
+	replicaSets        appslisters.ReplicaSetLister
+	statefulSets       appslisters.StatefulSetLister
 }
 
 var _ framework.PreFilterPlugin = &PodTopologySpread{}
@@ -65,13 +74,8 @@ func (pl *PodTopologySpread) Name() string {
 	return Name
 }
 
-// BuildArgs returns the arguments used to build the plugin.
-func (pl *PodTopologySpread) BuildArgs() interface{} {
-	return pl.args
-}
-
 // New initializes a new plugin and returns it.
-func New(plArgs runtime.Object, h framework.FrameworkHandle) (framework.Plugin, error) {
+func New(plArgs runtime.Object, h framework.Handle) (framework.Plugin, error) {
 	if h.SnapshotSharedLister() == nil {
 		return nil, fmt.Errorf("SnapshotSharedlister is nil")
 	}
@@ -79,14 +83,17 @@ func New(plArgs runtime.Object, h framework.FrameworkHandle) (framework.Plugin, 
 	if err != nil {
 		return nil, err
 	}
-	if err := validateArgs(&args); err != nil {
+	if err := validation.ValidatePodTopologySpreadArgs(&args); err != nil {
 		return nil, err
 	}
 	pl := &PodTopologySpread{
-		sharedLister: h.SnapshotSharedLister(),
-		args:         args,
+		sharedLister:       h.SnapshotSharedLister(),
+		defaultConstraints: args.DefaultConstraints,
 	}
-	if len(pl.args.DefaultConstraints) != 0 {
+	if args.DefaultingType == config.SystemDefaulting {
+		pl.defaultConstraints = systemDefaultConstraints
+	}
+	if len(pl.defaultConstraints) != 0 {
 		if h.SharedInformerFactory() == nil {
 			return nil, fmt.Errorf("SharedInformerFactory is nil")
 		}
@@ -108,65 +115,4 @@ func (pl *PodTopologySpread) setListers(factory informers.SharedInformerFactory)
 	pl.replicationCtrls = factory.Core().V1().ReplicationControllers().Lister()
 	pl.replicaSets = factory.Apps().V1().ReplicaSets().Lister()
 	pl.statefulSets = factory.Apps().V1().StatefulSets().Lister()
-}
-
-// validateArgs replicates the validation from
-// pkg/apis/core/validation.validateTopologySpreadConstraints.
-// This has the additional check for .labelSelector to be nil.
-func validateArgs(args *config.PodTopologySpreadArgs) error {
-	var allErrs field.ErrorList
-	path := field.NewPath("defaultConstraints")
-	for i, c := range args.DefaultConstraints {
-		p := path.Index(i)
-		if c.MaxSkew <= 0 {
-			f := p.Child("maxSkew")
-			allErrs = append(allErrs, field.Invalid(f, c.MaxSkew, "must be greater than zero"))
-		}
-		allErrs = append(allErrs, validateTopologyKey(p.Child("topologyKey"), c.TopologyKey)...)
-		if err := validateWhenUnsatisfiable(p.Child("whenUnsatisfiable"), c.WhenUnsatisfiable); err != nil {
-			allErrs = append(allErrs, err)
-		}
-		if c.LabelSelector != nil {
-			f := field.Forbidden(p.Child("labelSelector"), "constraint must not define a selector, as they deduced for each pod")
-			allErrs = append(allErrs, f)
-		}
-		if err := validateConstraintNotRepeat(path, args.DefaultConstraints, i); err != nil {
-			allErrs = append(allErrs, err)
-		}
-	}
-	if len(allErrs) == 0 {
-		return nil
-	}
-	return allErrs.ToAggregate()
-}
-
-func validateTopologyKey(p *field.Path, v string) field.ErrorList {
-	var allErrs field.ErrorList
-	if len(v) == 0 {
-		allErrs = append(allErrs, field.Required(p, "can not be empty"))
-	} else {
-		allErrs = append(allErrs, metav1validation.ValidateLabelName(v, p)...)
-	}
-	return allErrs
-}
-
-func validateWhenUnsatisfiable(p *field.Path, v v1.UnsatisfiableConstraintAction) *field.Error {
-	if len(v) == 0 {
-		return field.Required(p, "can not be empty")
-	}
-	if !supportedScheduleActions.Has(string(v)) {
-		return field.NotSupported(p, v, supportedScheduleActions.List())
-	}
-	return nil
-}
-
-func validateConstraintNotRepeat(path *field.Path, constraints []v1.TopologySpreadConstraint, idx int) *field.Error {
-	c := &constraints[idx]
-	for i := range constraints[:idx] {
-		other := &constraints[i]
-		if c.TopologyKey == other.TopologyKey && c.WhenUnsatisfiable == other.WhenUnsatisfiable {
-			return field.Duplicate(path.Index(idx), fmt.Sprintf("{%v, %v}", c.TopologyKey, c.WhenUnsatisfiable))
-		}
-	}
-	return nil
 }

@@ -170,6 +170,32 @@ var _ = SIGDescribe("CronJob", func() {
 		framework.ExpectNoError(err, "Failed to delete CronJob %s in namespace %s", cronJob.Name, f.Namespace.Name)
 	})
 
+	ginkgo.It("should be able to schedule after more than 100 missed schedule", func() {
+		ginkgo.By("Creating a cronjob")
+		cronJob := newTestCronJob("concurrent", "*/1 * * * ?", batchv1beta1.ForbidConcurrent,
+			sleepCommand, nil, nil)
+		creationTime := time.Now().Add(-99 * 24 * time.Hour)
+		lastScheduleTime := creationTime.Add(-1 * 24 * time.Hour)
+		cronJob.CreationTimestamp = metav1.Time{Time: creationTime}
+		cronJob.Status.LastScheduleTime = &metav1.Time{Time: lastScheduleTime}
+		cronJob, err := createCronJob(f.ClientSet, f.Namespace.Name, cronJob)
+		framework.ExpectNoError(err, "Failed to create CronJob in namespace %s", f.Namespace.Name)
+
+		ginkgo.By("Ensuring one job is running")
+		err = waitForActiveJobs(f.ClientSet, f.Namespace.Name, cronJob.Name, 1)
+		framework.ExpectNoError(err, "Failed to wait for active jobs in CronJob %s in namespace %s", cronJob.Name, f.Namespace.Name)
+
+		ginkgo.By("Ensuring at least one running jobs exists by listing jobs explicitly")
+		jobs, err := f.ClientSet.BatchV1().Jobs(f.Namespace.Name).List(context.TODO(), metav1.ListOptions{})
+		framework.ExpectNoError(err, "Failed to list the CronJobs in namespace %s", f.Namespace.Name)
+		activeJobs, _ := filterActiveJobs(jobs)
+		gomega.Expect(len(activeJobs)).To(gomega.BeNumerically(">=", 1))
+
+		ginkgo.By("Removing cronjob")
+		err = deleteCronJob(f.ClientSet, f.Namespace.Name, cronJob.Name)
+		framework.ExpectNoError(err, "Failed to delete CronJob %s in namespace %s", cronJob.Name, f.Namespace.Name)
+	})
+
 	// shouldn't give us unexpected warnings
 	ginkgo.It("should not emit unexpected warnings", func() {
 		ginkgo.By("Creating a cronjob")
@@ -453,7 +479,7 @@ func waitForJobReplaced(c clientset.Interface, ns, previousJobName string) error
 		// Ignore Jobs pending deletion, since deletion of Jobs is now asynchronous.
 		aliveJobs := filterNotDeletedJobs(jobs)
 		if len(aliveJobs) > 1 {
-			return false, fmt.Errorf("More than one job is running %+v", jobs.Items)
+			return false, fmt.Errorf("more than one job is running %+v", jobs.Items)
 		} else if len(aliveJobs) == 0 {
 			framework.Logf("Warning: Found 0 jobs in namespace %v", ns)
 			return false, nil

@@ -21,7 +21,7 @@ package tools
 import (
 	// linting tools
 	_ "github.com/client9/misspell/cmd/misspell"
-	_ "golang.org/x/lint/golint"
+	_ "github.com/google/go-flow-levee/cmd/levee"
 	_ "honnef.co/go/tools/cmd/staticcheck"
 
 	// benchmarking tools

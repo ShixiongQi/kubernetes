@@ -52,7 +52,7 @@ func checkForControllerManagerHealthy(duration time.Duration) error {
 	var PID string
 	cmd := "pidof kube-controller-manager"
 	for start := time.Now(); time.Since(start) < duration; time.Sleep(5 * time.Second) {
-		result, err := e2essh.SSH(cmd, net.JoinHostPort(framework.GetMasterHost(), e2essh.SSHPort), framework.TestContext.Provider)
+		result, err := e2essh.SSH(cmd, net.JoinHostPort(framework.APIAddress(), e2essh.SSHPort), framework.TestContext.Provider)
 		if err != nil {
 			// We don't necessarily know that it crashed, pipe could just be broken
 			e2essh.LogResult(result)
@@ -78,15 +78,15 @@ var _ = utils.SIGDescribe("NFSPersistentVolumes[Disruptive][Flaky]", func() {
 
 	f := framework.NewDefaultFramework("disruptive-pv")
 	var (
-		c                         clientset.Interface
-		ns                        string
-		nfsServerPod              *v1.Pod
-		nfsPVconfig               e2epv.PersistentVolumeConfig
-		pvcConfig                 e2epv.PersistentVolumeClaimConfig
-		nfsServerIP, clientNodeIP string
-		clientNode                *v1.Node
-		volLabel                  labels.Set
-		selector                  *metav1.LabelSelector
+		c                           clientset.Interface
+		ns                          string
+		nfsServerPod                *v1.Pod
+		nfsPVconfig                 e2epv.PersistentVolumeConfig
+		pvcConfig                   e2epv.PersistentVolumeClaimConfig
+		nfsServerHost, clientNodeIP string
+		clientNode                  *v1.Node
+		volLabel                    labels.Set
+		selector                    *metav1.LabelSelector
 	)
 
 	ginkgo.BeforeEach(func() {
@@ -99,13 +99,13 @@ var _ = utils.SIGDescribe("NFSPersistentVolumes[Disruptive][Flaky]", func() {
 		volLabel = labels.Set{e2epv.VolumeSelectorKey: ns}
 		selector = metav1.SetAsLabelSelector(volLabel)
 		// Start the NFS server pod.
-		_, nfsServerPod, nfsServerIP = e2evolume.NewNFSServer(c, ns, []string{"-G", "777", "/exports"})
+		_, nfsServerPod, nfsServerHost = e2evolume.NewNFSServer(c, ns, []string{"-G", "777", "/exports"})
 		nfsPVconfig = e2epv.PersistentVolumeConfig{
 			NamePrefix: "nfs-",
 			Labels:     volLabel,
 			PVSource: v1.PersistentVolumeSource{
 				NFS: &v1.NFSVolumeSource{
-					Server:   nfsServerIP,
+					Server:   nfsServerHost,
 					Path:     "/exports",
 					ReadOnly: false,
 				},
@@ -163,7 +163,7 @@ var _ = utils.SIGDescribe("NFSPersistentVolumes[Disruptive][Flaky]", func() {
 			}
 			pv1, pvc1, err = e2epv.CreatePVPVC(c, pvConfig1, pvcConfig, ns, false)
 			framework.ExpectNoError(err)
-			framework.ExpectNoError(e2epv.WaitOnPVandPVC(c, ns, pv1, pvc1))
+			framework.ExpectNoError(e2epv.WaitOnPVandPVC(c, f.Timeouts, ns, pv1, pvc1))
 
 			ginkgo.By("Initializing second PD with PVPVC binding")
 			pvSource2, diskName2 = createGCEVolume()
@@ -176,7 +176,7 @@ var _ = utils.SIGDescribe("NFSPersistentVolumes[Disruptive][Flaky]", func() {
 			}
 			pv2, pvc2, err = e2epv.CreatePVPVC(c, pvConfig2, pvcConfig, ns, false)
 			framework.ExpectNoError(err)
-			framework.ExpectNoError(e2epv.WaitOnPVandPVC(c, ns, pv2, pvc2))
+			framework.ExpectNoError(e2epv.WaitOnPVandPVC(c, f.Timeouts, ns, pv2, pvc2))
 
 			ginkgo.By("Attaching both PVC's to a single pod")
 			clientPod, err = e2epod.CreatePod(c, ns, nil, []*v1.PersistentVolumeClaim{pvc1, pvc2}, true, "")
@@ -312,7 +312,7 @@ func initTestCase(f *framework.Framework, c clientset.Interface, pvConfig e2epv.
 			e2epod.DeletePodWithWait(c, pod)
 		}
 	}()
-	err = e2epod.WaitForPodRunningInNamespace(c, pod)
+	err = e2epod.WaitTimeoutForPodRunningInNamespace(c, pod.Name, pod.Namespace, f.Timeouts.PodStart)
 	framework.ExpectNoError(err, fmt.Sprintf("Pod %q timed out waiting for phase: Running", pod.Name))
 	// Return created api objects
 	pod, err = c.CoreV1().Pods(ns).Get(context.TODO(), pod.Name, metav1.GetOptions{})

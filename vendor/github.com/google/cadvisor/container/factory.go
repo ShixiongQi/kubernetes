@@ -47,6 +47,7 @@ const (
 	ProcessSchedulerMetrics        MetricKind = "sched"
 	PerCpuUsageMetrics             MetricKind = "percpu"
 	MemoryUsageMetrics             MetricKind = "memory"
+	MemoryNumaMetrics              MetricKind = "memory_numa"
 	CpuLoadMetrics                 MetricKind = "cpuLoad"
 	DiskIOMetrics                  MetricKind = "diskIO"
 	DiskUsageMetrics               MetricKind = "disk"
@@ -61,6 +62,7 @@ const (
 	PerfMetrics                    MetricKind = "perf_event"
 	ReferencedMemoryMetrics        MetricKind = "referenced_memory"
 	CPUTopologyMetrics             MetricKind = "cpu_topology"
+	ResctrlMetrics                 MetricKind = "resctrl"
 )
 
 // AllMetrics represents all kinds of metrics that cAdvisor supported.
@@ -69,6 +71,7 @@ var AllMetrics = MetricSet{
 	ProcessSchedulerMetrics:        struct{}{},
 	PerCpuUsageMetrics:             struct{}{},
 	MemoryUsageMetrics:             struct{}{},
+	MemoryNumaMetrics:              struct{}{},
 	CpuLoadMetrics:                 struct{}{},
 	DiskIOMetrics:                  struct{}{},
 	AcceleratorUsageMetrics:        struct{}{},
@@ -83,6 +86,7 @@ var AllMetrics = MetricSet{
 	PerfMetrics:                    struct{}{},
 	ReferencedMemoryMetrics:        struct{}{},
 	CPUTopologyMetrics:             struct{}{},
+	ResctrlMetrics:                 struct{}{},
 }
 
 func (mk MetricKind) String() string {

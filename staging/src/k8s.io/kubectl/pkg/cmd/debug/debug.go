@@ -23,6 +23,7 @@ import (
 
 	"github.com/docker/distribution/reference"
 	"github.com/spf13/cobra"
+	"k8s.io/klog/v2"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -37,7 +38,6 @@ import (
 	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/tools/cache"
 	watchtools "k8s.io/client-go/tools/watch"
-	"k8s.io/klog/v2"
 	"k8s.io/kubectl/pkg/cmd/attach"
 	"k8s.io/kubectl/pkg/cmd/exec"
 	"k8s.io/kubectl/pkg/cmd/logs"
@@ -47,40 +47,80 @@ import (
 	"k8s.io/kubectl/pkg/util/i18n"
 	"k8s.io/kubectl/pkg/util/interrupt"
 	"k8s.io/kubectl/pkg/util/templates"
+	"k8s.io/utils/pointer"
 )
 
 var (
-	debugLong = templates.LongDesc(i18n.T(`Tools for debugging Kubernetes resources`))
+	debugLong = templates.LongDesc(i18n.T(`
+		Debug cluster resources using interactive debugging containers.
+
+		'debug' provides automation for common debugging tasks for cluster objects identified by
+		resource and name. Pods will be used by default if no resource is specified.
+
+		The action taken by 'debug' varies depending on what resource is specified. Supported
+		actions include:
+
+		* Workload: Create a copy of an existing pod with certain attributes changed,
+	                for example changing the image tag to a new version.
+		* Workload: Add an ephemeral container to an already running pod, for example to add
+		            debugging utilities without restarting the pod.
+		* Node: Create a new pod that runs in the node's host namespaces and can access
+		        the node's filesystem.
+`))
 
 	debugExample = templates.Examples(i18n.T(`
 		# Create an interactive debugging session in pod mypod and immediately attach to it.
 		# (requires the EphemeralContainers feature to be enabled in the cluster)
-		kubectl alpha debug mypod -i --image=busybox
+		kubectl debug mypod -it --image=busybox
 
 		# Create a debug container named debugger using a custom automated debugging image.
 		# (requires the EphemeralContainers feature to be enabled in the cluster)
-		kubectl alpha debug --image=myproj/debug-tools -c debugger mypod`))
+		kubectl debug --image=myproj/debug-tools -c debugger mypod
+
+		# Create a copy of mypod adding a debug container and attach to it
+		kubectl debug mypod -it --image=busybox --copy-to=my-debugger
+
+		# Create a copy of mypod changing the command of mycontainer
+		kubectl debug mypod -it --copy-to=my-debugger --container=mycontainer -- sh
+
+		# Create a copy of mypod changing all container images to busybox
+		kubectl debug mypod --copy-to=my-debugger --set-image=*=busybox
+
+		# Create a copy of mypod adding a debug container and changing container images
+		kubectl debug mypod -it --copy-to=my-debugger --image=debian --set-image=app=app:debug,sidecar=sidecar:debug
+
+		# Create an interactive debugging session on a node and immediately attach to it.
+		# The container will run in the host namespaces and the host's filesystem will be mounted at /host
+		kubectl debug node/mynode -it --image=busybox
+`))
 )
 
 var nameSuffixFunc = utilrand.String
 
 // DebugOptions holds the options for an invocation of kubectl debug.
 type DebugOptions struct {
-	Args        []string
-	ArgsOnly    bool
-	Attach      bool
-	Container   string
-	Env         []corev1.EnvVar
-	Image       string
-	Interactive bool
-	Namespace   string
-	TargetNames []string
-	PullPolicy  corev1.PullPolicy
-	Quiet       bool
-	Target      string
-	TTY         bool
+	Args            []string
+	ArgsOnly        bool
+	Attach          bool
+	Container       string
+	CopyTo          string
+	Replace         bool
+	Env             []corev1.EnvVar
+	Image           string
+	Interactive     bool
+	Namespace       string
+	TargetNames     []string
+	PullPolicy      corev1.PullPolicy
+	Quiet           bool
+	SameNode        bool
+	SetImages       map[string]string
+	ShareProcesses  bool
+	TargetContainer string
+	TTY             bool
 
-	builder   *resource.Builder
+	attachChanged         bool
+	shareProcessedChanged bool
+
 	podClient corev1client.PodsGetter
 
 	genericclioptions.IOStreams
@@ -89,9 +129,10 @@ type DebugOptions struct {
 // NewDebugOptions returns a DebugOptions initialized with default values.
 func NewDebugOptions(streams genericclioptions.IOStreams) *DebugOptions {
 	return &DebugOptions{
-		Args:        []string{},
-		IOStreams:   streams,
-		TargetNames: []string{},
+		Args:           []string{},
+		IOStreams:      streams,
+		TargetNames:    []string{},
+		ShareProcesses: true,
 	}
 }
 
@@ -100,9 +141,9 @@ func NewCmdDebug(f cmdutil.Factory, streams genericclioptions.IOStreams) *cobra.
 	o := NewDebugOptions(streams)
 
 	cmd := &cobra.Command{
-		Use:                   "debug NAME --image=image [ -- COMMAND [args...] ]",
+		Use:                   "debug (POD | TYPE[[.VERSION].GROUP]/NAME) [ -- COMMAND [args...] ]",
 		DisableFlagsInUseLine: true,
-		Short:                 i18n.T("Attach a debug container to a running pod"),
+		Short:                 i18n.T("Create debugging sessions for troubleshooting workloads and nodes"),
 		Long:                  debugLong,
 		Example:               debugExample,
 		Run: func(cmd *cobra.Command, args []string) {
@@ -118,23 +159,26 @@ func NewCmdDebug(f cmdutil.Factory, streams genericclioptions.IOStreams) *cobra.
 
 func addDebugFlags(cmd *cobra.Command, opt *DebugOptions) {
 	cmd.Flags().BoolVar(&opt.ArgsOnly, "arguments-only", opt.ArgsOnly, i18n.T("If specified, everything after -- will be passed to the new container as Args instead of Command."))
-	cmd.Flags().BoolVar(&opt.Attach, "attach", opt.Attach, i18n.T("If true, wait for the Pod to start running, and then attach to the Pod as if 'kubectl attach ...' were called.  Default false, unless '-i/--stdin' is set, in which case the default is true."))
+	cmd.Flags().BoolVar(&opt.Attach, "attach", opt.Attach, i18n.T("If true, wait for the container to start running, and then attach as if 'kubectl attach ...' were called.  Default false, unless '-i/--stdin' is set, in which case the default is true."))
 	cmd.Flags().StringVarP(&opt.Container, "container", "c", opt.Container, i18n.T("Container name to use for debug container."))
+	cmd.Flags().StringVar(&opt.CopyTo, "copy-to", opt.CopyTo, i18n.T("Create a copy of the target Pod with this name."))
+	cmd.Flags().BoolVar(&opt.Replace, "replace", opt.Replace, i18n.T("When used with '--copy-to', delete the original Pod."))
 	cmd.Flags().StringToString("env", nil, i18n.T("Environment variables to set in the container."))
 	cmd.Flags().StringVar(&opt.Image, "image", opt.Image, i18n.T("Container image to use for debug container."))
-	cmd.MarkFlagRequired("image")
-	cmd.Flags().String("image-pull-policy", string(corev1.PullIfNotPresent), i18n.T("The image pull policy for the container."))
+	cmd.Flags().StringToStringVar(&opt.SetImages, "set-image", opt.SetImages, i18n.T("When used with '--copy-to', a list of name=image pairs for changing container images, similar to how 'kubectl set image' works."))
+	cmd.Flags().String("image-pull-policy", "", i18n.T("The image pull policy for the container. If left empty, this value will not be specified by the client and defaulted by the server."))
 	cmd.Flags().BoolVarP(&opt.Interactive, "stdin", "i", opt.Interactive, i18n.T("Keep stdin open on the container(s) in the pod, even if nothing is attached."))
-	cmd.Flags().BoolVar(&opt.Quiet, "quiet", opt.Quiet, i18n.T("If true, suppress prompt messages."))
-	cmd.Flags().StringVar(&opt.Target, "target", "", i18n.T("Target processes in this container name."))
-	cmd.Flags().BoolVarP(&opt.TTY, "tty", "t", opt.TTY, i18n.T("Allocated a TTY for each container in the pod."))
+	cmd.Flags().BoolVarP(&opt.Quiet, "quiet", "q", opt.Quiet, i18n.T("If true, suppress informational messages."))
+	cmd.Flags().BoolVar(&opt.SameNode, "same-node", opt.SameNode, i18n.T("When used with '--copy-to', schedule the copy of target Pod on the same node."))
+	cmd.Flags().BoolVar(&opt.ShareProcesses, "share-processes", opt.ShareProcesses, i18n.T("When used with '--copy-to', enable process namespace sharing in the copy."))
+	cmd.Flags().StringVar(&opt.TargetContainer, "target", "", i18n.T("When using an ephemeral container, target processes in this container name."))
+	cmd.Flags().BoolVarP(&opt.TTY, "tty", "t", opt.TTY, i18n.T("Allocate a TTY for the debugging container."))
 }
 
 // Complete finishes run-time initialization of debug.DebugOptions.
 func (o *DebugOptions) Complete(f cmdutil.Factory, cmd *cobra.Command, args []string) error {
 	var err error
 
-	o.builder = f.NewBuilder()
 	o.PullPolicy = corev1.PullPolicy(cmdutil.GetFlagString(cmd, "image-pull-policy"))
 
 	// Arguments
@@ -166,24 +210,45 @@ func (o *DebugOptions) Complete(f cmdutil.Factory, cmd *cobra.Command, args []st
 		return err
 	}
 
-	// Clientset
-	clientset, err := f.KubernetesClientSet()
-	if err != nil {
-		return fmt.Errorf("internal error getting clientset: %v", err)
-	}
-	o.podClient = clientset.CoreV1()
+	// Record flags that the user explicitly changed from their defaults
+	o.attachChanged = cmd.Flags().Changed("attach")
+	o.shareProcessedChanged = cmd.Flags().Changed("share-processes")
 
 	return nil
 }
 
 // Validate checks that the provided debug options are specified.
 func (o *DebugOptions) Validate(cmd *cobra.Command) error {
-	// Image
-	if len(o.Image) == 0 {
-		return fmt.Errorf("--image is required")
+	// Attach
+	if o.Attach && o.attachChanged && len(o.Image) == 0 && len(o.Container) == 0 {
+		return fmt.Errorf("you must specify --container or create a new container using --image in order to attach.")
 	}
-	if !reference.ReferenceRegexp.MatchString(o.Image) {
-		return fmt.Errorf("Invalid image name %q: %v", o.Image, reference.ErrReferenceInvalidFormat)
+
+	// CopyTo
+	if len(o.CopyTo) > 0 {
+		if len(o.Image) == 0 && len(o.SetImages) == 0 && len(o.Args) == 0 {
+			return fmt.Errorf("you must specify --image, --set-image or command arguments.")
+		}
+		if len(o.Args) > 0 && len(o.Container) == 0 && len(o.Image) == 0 {
+			return fmt.Errorf("you must specify an existing container or a new image when specifying args.")
+		}
+	} else {
+		// These flags are exclusive to --copy-to
+		switch {
+		case o.Replace:
+			return fmt.Errorf("--replace may only be used with --copy-to.")
+		case o.SameNode:
+			return fmt.Errorf("--same-node may only be used with --copy-to.")
+		case len(o.SetImages) > 0:
+			return fmt.Errorf("--set-image may only be used with --copy-to.")
+		case len(o.Image) == 0:
+			return fmt.Errorf("you must specify --image when not using --copy-to.")
+		}
+	}
+
+	// Image
+	if len(o.Image) > 0 && !reference.ReferenceRegexp.MatchString(o.Image) {
+		return fmt.Errorf("invalid image name %q: %v", o.Image, reference.ErrReferenceInvalidFormat)
 	}
 
 	// Name
@@ -199,6 +264,18 @@ func (o *DebugOptions) Validate(cmd *cobra.Command) error {
 		return fmt.Errorf("invalid image pull policy: %s", o.PullPolicy)
 	}
 
+	// SetImages
+	for name, image := range o.SetImages {
+		if !reference.ReferenceRegexp.MatchString(image) {
+			return fmt.Errorf("invalid image name %q for container %q: %v", image, name, reference.ErrReferenceInvalidFormat)
+		}
+	}
+
+	// TargetContainer
+	if len(o.TargetContainer) > 0 && len(o.CopyTo) > 0 {
+		return fmt.Errorf("--target is incompatible with --copy-to. Use --share-processes instead.")
+	}
+
 	// TTY
 	if o.TTY && !o.Interactive {
 		return fmt.Errorf("-i/--stdin is required for containers with -t/--tty=true")
@@ -211,7 +288,13 @@ func (o *DebugOptions) Validate(cmd *cobra.Command) error {
 func (o *DebugOptions) Run(f cmdutil.Factory, cmd *cobra.Command) error {
 	ctx := context.Background()
 
-	r := o.builder.
+	clientset, err := f.KubernetesClientSet()
+	if err != nil {
+		return fmt.Errorf("internal error getting clientset: %v", err)
+	}
+	o.podClient = clientset.CoreV1()
+
+	r := f.NewBuilder().
 		WithScheme(scheme.Scheme, scheme.Scheme.PrioritizedVersionsAllGroups()...).
 		NamespaceParam(o.Namespace).DefaultNamespace().ResourceNames("pods", o.TargetNames...).
 		Do()
@@ -219,7 +302,7 @@ func (o *DebugOptions) Run(f cmdutil.Factory, cmd *cobra.Command) error {
 		return err
 	}
 
-	err := r.Visit(func(info *resource.Info, err error) error {
+	err = r.Visit(func(info *resource.Info, err error) error {
 		if err != nil {
 			// TODO(verb): configurable early return
 			return err
@@ -231,6 +314,8 @@ func (o *DebugOptions) Run(f cmdutil.Factory, cmd *cobra.Command) error {
 			visitErr      error
 		)
 		switch obj := info.Object.(type) {
+		case *corev1.Node:
+			debugPod, containerName, visitErr = o.visitNode(ctx, obj)
 		case *corev1.Pod:
 			debugPod, containerName, visitErr = o.visitPod(ctx, obj)
 		default:
@@ -240,7 +325,7 @@ func (o *DebugOptions) Run(f cmdutil.Factory, cmd *cobra.Command) error {
 			return visitErr
 		}
 
-		if o.Attach {
+		if o.Attach && len(containerName) > 0 {
 			opts := &attach.AttachOptions{
 				StreamOptions: exec.StreamOptions{
 					IOStreams: o.IOStreams,
@@ -271,11 +356,31 @@ func (o *DebugOptions) Run(f cmdutil.Factory, cmd *cobra.Command) error {
 	return err
 }
 
+// visitNode handles debugging for node targets by creating a privileged pod running in the host namespaces.
+// Returns an already created pod and container name for subsequent attach, if applicable.
+func (o *DebugOptions) visitNode(ctx context.Context, node *corev1.Node) (*corev1.Pod, string, error) {
+	pods := o.podClient.Pods(o.Namespace)
+	newPod, err := pods.Create(ctx, o.generateNodeDebugPod(node.Name), metav1.CreateOptions{})
+	if err != nil {
+		return nil, "", err
+	}
+
+	return newPod, newPod.Spec.Containers[0].Name, nil
+}
+
 // visitPod handles debugging for pod targets by (depending on options):
 //   1. Creating an ephemeral debug container in an existing pod, OR
-//   2. Making a copy of pod with certain attributes changed (NOT YET IMPLEMENTED)
+//   2. Making a copy of pod with certain attributes changed
 // visitPod returns a pod and debug container name for subsequent attach, if applicable.
 func (o *DebugOptions) visitPod(ctx context.Context, pod *corev1.Pod) (*corev1.Pod, string, error) {
+	if len(o.CopyTo) > 0 {
+		return o.debugByCopy(ctx, pod)
+	}
+	return o.debugByEphemeralContainer(ctx, pod)
+}
+
+// debugByEphemeralContainer runs an EphemeralContainer in the target Pod for use as a debug container
+func (o *DebugOptions) debugByEphemeralContainer(ctx context.Context, pod *corev1.Pod) (*corev1.Pod, string, error) {
 	pods := o.podClient.Pods(pod.Namespace)
 	ec, err := pods.GetEphemeralContainers(ctx, pod.Name, metav1.GetOptions{})
 	if err != nil {
@@ -298,34 +403,29 @@ func (o *DebugOptions) visitPod(ctx context.Context, pod *corev1.Pod) (*corev1.P
 	return pod, debugContainer.Name, nil
 }
 
-func containerNames(pod *corev1.Pod) map[string]bool {
-	names := map[string]bool{}
-	for _, c := range pod.Spec.Containers {
-		names[c.Name] = true
+// debugByCopy runs a copy of the target Pod with a debug container added or an original container modified
+func (o *DebugOptions) debugByCopy(ctx context.Context, pod *corev1.Pod) (*corev1.Pod, string, error) {
+	copied, dc, err := o.generatePodCopyWithDebugContainer(pod)
+	if err != nil {
+		return nil, "", err
 	}
-	for _, c := range pod.Spec.InitContainers {
-		names[c.Name] = true
+	created, err := o.podClient.Pods(copied.Namespace).Create(ctx, copied, metav1.CreateOptions{})
+	if err != nil {
+		return nil, "", err
 	}
-	for _, c := range pod.Spec.EphemeralContainers {
-		names[c.Name] = true
+	if o.Replace {
+		err := o.podClient.Pods(pod.Namespace).Delete(ctx, pod.Name, *metav1.NewDeleteOptions(0))
+		if err != nil {
+			return nil, "", err
+		}
 	}
-	return names
+	return created, dc, nil
 }
 
 // generateDebugContainer returns an EphemeralContainer suitable for use as a debug container
 // in the given pod.
 func (o *DebugOptions) generateDebugContainer(pod *corev1.Pod) *corev1.EphemeralContainer {
-	name := o.Container
-	if len(name) == 0 {
-		cn, existing := "", containerNames(pod)
-		for len(cn) == 0 || existing[cn] {
-			cn = fmt.Sprintf("debugger-%s", nameSuffixFunc(5))
-		}
-		if !o.Quiet {
-			fmt.Fprintf(o.ErrOut, "Defaulting debug container name to %s.\n", cn)
-		}
-		name = cn
-	}
+	name := o.computeDebugContainerName(pod)
 
 	ec := &corev1.EphemeralContainer{
 		EphemeralContainerCommon: corev1.EphemeralContainerCommon{
@@ -337,7 +437,7 @@ func (o *DebugOptions) generateDebugContainer(pod *corev1.Pod) *corev1.Ephemeral
 			TerminationMessagePolicy: corev1.TerminationMessageReadFile,
 			TTY:                      o.TTY,
 		},
-		TargetContainerName: o.Target,
+		TargetContainerName: o.TargetContainer,
 	}
 
 	if o.ArgsOnly {
@@ -349,8 +449,187 @@ func (o *DebugOptions) generateDebugContainer(pod *corev1.Pod) *corev1.Ephemeral
 	return ec
 }
 
-// waitForEphemeralContainer watches the given pod until the ephemeralContainer is running
-func waitForEphemeralContainer(ctx context.Context, podClient corev1client.PodsGetter, ns, podName, ephemeralContainerName string) (*corev1.Pod, error) {
+// generateNodeDebugPod generates a debugging pod that schedules on the specified node.
+// The generated pod will run in the host PID, Network & IPC namespaces, and it will have the node's filesystem mounted at /host.
+func (o *DebugOptions) generateNodeDebugPod(node string) *corev1.Pod {
+	cn := "debugger"
+	// Setting a user-specified container name doesn't make much difference when there's only one container,
+	// but the argument exists for pod debugging so it might be confusing if it didn't work here.
+	if len(o.Container) > 0 {
+		cn = o.Container
+	}
+
+	// The name of the debugging pod is based on the target node, and it's not configurable to
+	// limit the number of command line flags. There may be a collision on the name, but this
+	// should be rare enough that it's not worth the API round trip to check.
+	pn := fmt.Sprintf("node-debugger-%s-%s", node, nameSuffixFunc(5))
+	if !o.Quiet {
+		fmt.Fprintf(o.Out, "Creating debugging pod %s with container %s on node %s.\n", pn, cn, node)
+	}
+
+	p := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: pn,
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{
+					Name:                     cn,
+					Env:                      o.Env,
+					Image:                    o.Image,
+					ImagePullPolicy:          o.PullPolicy,
+					Stdin:                    o.Interactive,
+					TerminationMessagePolicy: corev1.TerminationMessageReadFile,
+					TTY:                      o.TTY,
+					VolumeMounts: []corev1.VolumeMount{
+						{
+							MountPath: "/host",
+							Name:      "host-root",
+						},
+					},
+				},
+			},
+			HostIPC:       true,
+			HostNetwork:   true,
+			HostPID:       true,
+			NodeName:      node,
+			RestartPolicy: corev1.RestartPolicyNever,
+			Volumes: []corev1.Volume{
+				{
+					Name: "host-root",
+					VolumeSource: corev1.VolumeSource{
+						HostPath: &corev1.HostPathVolumeSource{Path: "/"},
+					},
+				},
+			},
+		},
+	}
+
+	if o.ArgsOnly {
+		p.Spec.Containers[0].Args = o.Args
+	} else {
+		p.Spec.Containers[0].Command = o.Args
+	}
+
+	return p
+}
+
+// generatePodCopyWithDebugContainer takes a Pod and returns a copy and the debug container name of that copy
+func (o *DebugOptions) generatePodCopyWithDebugContainer(pod *corev1.Pod) (*corev1.Pod, string, error) {
+	copied := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        o.CopyTo,
+			Namespace:   pod.Namespace,
+			Annotations: pod.Annotations,
+		},
+		Spec: *pod.Spec.DeepCopy(),
+	}
+	// set EphemeralContainers to nil so that the copy of pod can be created
+	copied.Spec.EphemeralContainers = nil
+	// change ShareProcessNamespace configuration only when commanded explicitly
+	if o.shareProcessedChanged {
+		copied.Spec.ShareProcessNamespace = pointer.BoolPtr(o.ShareProcesses)
+	}
+	if !o.SameNode {
+		copied.Spec.NodeName = ""
+	}
+
+	// Apply image mutations
+	for i, c := range copied.Spec.Containers {
+		override := o.SetImages["*"]
+		if img, ok := o.SetImages[c.Name]; ok {
+			override = img
+		}
+		if len(override) > 0 {
+			copied.Spec.Containers[i].Image = override
+		}
+	}
+
+	name, containerByName := o.Container, containerNameToRef(copied)
+
+	c, ok := containerByName[name]
+	if !ok {
+		// Adding a new debug container
+		if len(o.Image) == 0 {
+			if len(o.SetImages) > 0 {
+				// This was a --set-image only invocation
+				return copied, "", nil
+			}
+			return nil, "", fmt.Errorf("you must specify image when creating new container")
+		}
+
+		if len(name) == 0 {
+			name = o.computeDebugContainerName(copied)
+		}
+		c = &corev1.Container{
+			Name:                     name,
+			TerminationMessagePolicy: corev1.TerminationMessageReadFile,
+		}
+		defer func() {
+			copied.Spec.Containers = append(copied.Spec.Containers, *c)
+		}()
+	}
+
+	if len(o.Args) > 0 {
+		if o.ArgsOnly {
+			c.Args = o.Args
+		} else {
+			c.Command = o.Args
+			c.Args = nil
+		}
+	}
+	if len(o.Env) > 0 {
+		c.Env = o.Env
+	}
+	if len(o.Image) > 0 {
+		c.Image = o.Image
+	}
+	if len(o.PullPolicy) > 0 {
+		c.ImagePullPolicy = o.PullPolicy
+	}
+	c.Stdin = o.Interactive
+	c.TTY = o.TTY
+
+	return copied, name, nil
+}
+
+func (o *DebugOptions) computeDebugContainerName(pod *corev1.Pod) string {
+	if len(o.Container) > 0 {
+		return o.Container
+	}
+	name := o.Container
+	if len(name) == 0 {
+		cn, containerByName := "", containerNameToRef(pod)
+		for len(cn) == 0 || (containerByName[cn] != nil) {
+			cn = fmt.Sprintf("debugger-%s", nameSuffixFunc(5))
+		}
+		if !o.Quiet {
+			fmt.Fprintf(o.Out, "Defaulting debug container name to %s.\n", cn)
+		}
+		name = cn
+	}
+	return name
+}
+
+func containerNameToRef(pod *corev1.Pod) map[string]*corev1.Container {
+	names := map[string]*corev1.Container{}
+	for i := range pod.Spec.Containers {
+		ref := &pod.Spec.Containers[i]
+		names[ref.Name] = ref
+	}
+	for i := range pod.Spec.InitContainers {
+		ref := &pod.Spec.InitContainers[i]
+		names[ref.Name] = ref
+	}
+	for i := range pod.Spec.EphemeralContainers {
+		ref := (*corev1.Container)(&pod.Spec.EphemeralContainers[i].EphemeralContainerCommon)
+		names[ref.Name] = ref
+	}
+	return names
+}
+
+// waitForContainer watches the given pod until the container is running
+func waitForContainer(ctx context.Context, podClient corev1client.PodsGetter, ns, podName, containerName string) (*corev1.Pod, error) {
 	// TODO: expose the timeout
 	ctx, cancel := watchtools.ContextWithOptionalTimeout(ctx, 0*time.Second)
 	defer cancel()
@@ -381,17 +660,14 @@ func waitForEphemeralContainer(ctx context.Context, podClient corev1client.PodsG
 				return false, fmt.Errorf("watch did not return a pod: %v", ev.Object)
 			}
 
-			for _, s := range p.Status.EphemeralContainerStatuses {
-				if s.Name != ephemeralContainerName {
-					continue
-				}
-
-				klog.V(2).Infof("debug container status is %v", s)
-				if s.State.Running != nil || s.State.Terminated != nil {
-					return true, nil
-				}
+			s := getContainerStatusByName(p, containerName)
+			if s == nil {
+				return false, nil
 			}
-
+			klog.V(2).Infof("debug container status is %v", s)
+			if s.State.Running != nil || s.State.Terminated != nil {
+				return true, nil
+			}
 			return false, nil
 		})
 		if ev != nil {
@@ -403,9 +679,8 @@ func waitForEphemeralContainer(ctx context.Context, podClient corev1client.PodsG
 	return result, err
 }
 
-// TODO(verb): handle other types of containers
-func handleAttachPod(ctx context.Context, f cmdutil.Factory, podClient corev1client.PodsGetter, ns, podName, ephemeralContainerName string, opts *attach.AttachOptions) error {
-	pod, err := waitForEphemeralContainer(ctx, podClient, ns, podName, ephemeralContainerName)
+func handleAttachPod(ctx context.Context, f cmdutil.Factory, podClient corev1client.PodsGetter, ns, podName, containerName string, opts *attach.AttachOptions) error {
+	pod, err := waitForContainer(ctx, podClient, ns, podName, containerName)
 	if err != nil {
 		return err
 	}
@@ -413,16 +688,15 @@ func handleAttachPod(ctx context.Context, f cmdutil.Factory, podClient corev1cli
 	opts.Namespace = ns
 	opts.Pod = pod
 	opts.PodName = podName
-	opts.ContainerName = ephemeralContainerName
+	opts.ContainerName = containerName
 	if opts.AttachFunc == nil {
 		opts.AttachFunc = attach.DefaultAttachFunc
 	}
 
-	var status *corev1.ContainerStatus
-	for i := range pod.Status.EphemeralContainerStatuses {
-		if pod.Status.EphemeralContainerStatuses[i].Name == ephemeralContainerName {
-			status = &pod.Status.EphemeralContainerStatuses[i]
-		}
+	status := getContainerStatusByName(pod, containerName)
+	if status == nil {
+		// impossible path
+		return fmt.Errorf("error getting container status of container name %q: %+v", containerName, err)
 	}
 	if status.State.Terminated != nil {
 		klog.V(1).Info("Ephemeral container terminated, falling back to logs")
@@ -432,6 +706,18 @@ func handleAttachPod(ctx context.Context, f cmdutil.Factory, podClient corev1cli
 	if err := opts.Run(); err != nil {
 		fmt.Fprintf(opts.ErrOut, "Error attaching, falling back to logs: %v\n", err)
 		return logOpts(f, pod, opts)
+	}
+	return nil
+}
+
+func getContainerStatusByName(pod *corev1.Pod, containerName string) *corev1.ContainerStatus {
+	allContainerStatus := [][]corev1.ContainerStatus{pod.Status.InitContainerStatuses, pod.Status.ContainerStatuses, pod.Status.EphemeralContainerStatuses}
+	for _, statusSlice := range allContainerStatus {
+		for i := range statusSlice {
+			if statusSlice[i].Name == containerName {
+				return &statusSlice[i]
+			}
+		}
 	}
 	return nil
 }

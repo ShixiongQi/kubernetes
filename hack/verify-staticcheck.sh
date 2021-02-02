@@ -68,7 +68,7 @@ while IFS='' read -r line; do
   all_packages+=("./$line")
 done < <( hack/make-rules/helpers/cache_go_dirs.sh "${KUBE_ROOT}/_tmp/all_go_dirs" |
             grep "^${FOCUS:-.}" |
-            grep -vE "(third_party|generated|clientset_generated|hack|/_)" |
+            grep -vE "(third_party|generated|clientset_generated|hack|testdata|/_)" |
             grep -vE "$ignore_pattern" )
 
 failing_packages=()
@@ -94,7 +94,7 @@ while read -r error; do
   elif [[ "${in_failing}" -eq "0" ]]; then
     really_failing+=( "$pkg" )
   fi
-done < <(staticcheck -checks "${checks}" "${all_packages[@]}" 2>/dev/null || true)
+done < <(GOOS=linux staticcheck -checks "${checks}" "${all_packages[@]}" 2>/dev/null || true)
 
 export IFS=$'\n'  # Expand ${really_failing[*]} to separate lines
 kube::util::read-array really_failing < <(sort -u <<<"${really_failing[*]}")

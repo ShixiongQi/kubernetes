@@ -334,7 +334,7 @@ function kube::release::create_docker_images_for_server() {
     local images_dir
     binary_dir="$1"
     arch="$2"
-    binaries=$(kube::build::get_docker_wrapped_binaries "${arch}")
+    binaries=$(kube::build::get_docker_wrapped_binaries)
     images_dir="${RELEASE_IMAGES}/${arch}"
     mkdir -p "${images_dir}"
 
@@ -383,7 +383,13 @@ EOF
           echo "COPY nsswitch.conf /etc/" >> "${docker_file_path}"
         fi
 
-        "${DOCKER[@]}" build ${docker_build_opts:+"${docker_build_opts}"} -q -t "${docker_image_tag}" "${docker_build_path}" >/dev/null
+        DOCKER_CLI_EXPERIMENTAL=enabled "${DOCKER[@]}" buildx build \
+          --platform linux/"${arch}" \
+          --load ${docker_build_opts:+"${docker_build_opts}"} \
+          -q \
+          -t "${docker_image_tag}" \
+          "${docker_build_path}" >/dev/null
+
         # If we are building an official/alpha/beta release we want to keep
         # docker images and tag them appropriately.
         local -r release_docker_image_tag="${KUBE_DOCKER_REGISTRY-$docker_registry}/${binary_name}-${arch}:${KUBE_DOCKER_IMAGE_TAG-$docker_tag}"
@@ -434,7 +440,6 @@ function kube::release::package_kube_manifests_tarball() {
   cp "${src_dir}/kube-controller-manager.manifest" "${dst_dir}"
   cp "${src_dir}/kube-addon-manager.yaml" "${dst_dir}"
   cp "${src_dir}/glbc.manifest" "${dst_dir}"
-  cp "${src_dir}/etcd-empty-dir-cleanup.yaml" "${dst_dir}/"
   find "${src_dir}" -name 'internal-*' -exec cp {} "${dst_dir}" \;
   cp "${KUBE_ROOT}/cluster/gce/gci/configure-helper.sh" "${dst_dir}/gci-configure-helper.sh"
   cp "${KUBE_ROOT}/cluster/gce/gci/configure-kubeapiserver.sh" "${dst_dir}/configure-kubeapiserver.sh"

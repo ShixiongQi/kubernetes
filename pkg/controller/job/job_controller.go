@@ -28,6 +28,7 @@ import (
 	batch "k8s.io/api/batch/v1"
 	"k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -43,10 +44,9 @@ import (
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/component-base/metrics/prometheus/ratelimiter"
+	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/pkg/controller"
 	"k8s.io/utils/integer"
-
-	"k8s.io/klog/v2"
 )
 
 const statusUpdateRetries = 3
@@ -55,7 +55,7 @@ const statusUpdateRetries = 3
 var controllerKind = batch.SchemeGroupVersion.WithKind("Job")
 
 var (
-	// DefaultJobBackOff is the max backoff period, exported for the e2e test
+	// DefaultJobBackOff is the default backoff period, exported for the e2e test
 	DefaultJobBackOff = 10 * time.Second
 	// MaxJobBackOff is the max backoff period, exported for the e2e test
 	MaxJobBackOff = 360 * time.Second
@@ -96,7 +96,7 @@ type Controller struct {
 // in sync with their corresponding Job objects.
 func NewController(podInformer coreinformers.PodInformer, jobInformer batchinformers.JobInformer, kubeClient clientset.Interface) *Controller {
 	eventBroadcaster := record.NewBroadcaster()
-	eventBroadcaster.StartLogging(klog.Infof)
+	eventBroadcaster.StartStructuredLogging(0)
 	eventBroadcaster.StartRecordingToSink(&v1core.EventSinkImpl{Interface: kubeClient.CoreV1().Events("")})
 
 	if kubeClient != nil && kubeClient.CoreV1().RESTClient().GetRateLimiter() != nil {
@@ -202,7 +202,7 @@ func (jm *Controller) resolveControllerRef(namespace string, controllerRef *meta
 func (jm *Controller) addPod(obj interface{}) {
 	pod := obj.(*v1.Pod)
 	if pod.DeletionTimestamp != nil {
-		// on a restart of the controller controller, it's possible a new pod shows up in a state that
+		// on a restart of the controller, it's possible a new pod shows up in a state that
 		// is already pending deletion. Prevent the pod from being a creation observation.
 		jm.deletePod(pod)
 		return
@@ -348,7 +348,7 @@ func (jm *Controller) updateJob(old, cur interface{}) {
 			total := time.Duration(*curADS) * time.Second
 			// AddAfter will handle total < passed
 			jm.queue.AddAfter(key, total-passed)
-			klog.V(4).Infof("job ActiveDeadlineSeconds updated, will rsync after %d seconds", total-passed)
+			klog.V(4).Infof("job %q ActiveDeadlineSeconds updated, will rsync after %d seconds", key, total-passed)
 		}
 	}
 }
@@ -467,9 +467,6 @@ func (jm *Controller) syncJob(key string) (bool, error) {
 		return true, nil
 	}
 
-	// retrieve the previous number of retry
-	previousRetry := jm.queue.NumRequeues(key)
-
 	// Check the expectations of the job before counting active pods, otherwise a new pod can sneak in
 	// and update the expectations after we've retrieved active pods from the store. If a new pod enters
 	// the store after we've checked the expectation, the job sync is just deferred till the next relist.
@@ -506,7 +503,7 @@ func (jm *Controller) syncJob(key string) (bool, error) {
 	// is different than parallelism, otherwise the previous controller loop
 	// failed updating status so even if we pick up failure it is not a new one
 	exceedsBackoffLimit := jobHaveNewFailure && (active != *job.Spec.Parallelism) &&
-		(int32(previousRetry)+1 > *job.Spec.BackoffLimit)
+		(failed > *job.Spec.BackoffLimit)
 
 	if exceedsBackoffLimit || pastBackoffLimitOnFailure(&job, pods) {
 		// check if the number of pod restart exceeds backoff (for restart OnFailure only)
@@ -618,7 +615,7 @@ func (jm *Controller) deleteJobPods(job *batch.Job, pods []*v1.Pod, errCh chan<-
 	for i := int32(0); i < int32(nbPods); i++ {
 		go func(ix int32) {
 			defer wait.Done()
-			if err := jm.podControl.DeletePod(job.Namespace, pods[ix].Name, job); err != nil {
+			if err := jm.podControl.DeletePod(job.Namespace, pods[ix].Name, job); err != nil && !apierrors.IsNotFound(err) {
 				defer utilruntime.HandleError(err)
 				klog.V(2).Infof("Failed to delete %v, job %q/%q deadline exceeded", pods[ix].Name, job.Namespace, job.Name)
 				errCh <- err
@@ -715,14 +712,17 @@ func (jm *Controller) manageJob(activePods []*v1.Pod, succeeded int32, job *batc
 			go func(ix int32) {
 				defer wait.Done()
 				if err := jm.podControl.DeletePod(job.Namespace, activePods[ix].Name, job); err != nil {
-					defer utilruntime.HandleError(err)
 					// Decrement the expected number of deletes because the informer won't observe this deletion
-					klog.V(2).Infof("Failed to delete %v, decrementing expectations for job %q/%q", activePods[ix].Name, job.Namespace, job.Name)
 					jm.expectations.DeletionObserved(jobKey)
-					activeLock.Lock()
-					active++
-					activeLock.Unlock()
-					errCh <- err
+					if !apierrors.IsNotFound(err) {
+						klog.V(2).Infof("Failed to delete %v, decremented expectations for job %q/%q", activePods[ix].Name, job.Namespace, job.Name)
+						activeLock.Lock()
+						active++
+						activeLock.Unlock()
+						errCh <- err
+						utilruntime.HandleError(err)
+					}
+
 				}
 			}(i)
 		}

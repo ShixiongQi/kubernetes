@@ -29,7 +29,7 @@ import (
 	volumehelpers "k8s.io/cloud-provider/volume/helpers"
 	"k8s.io/klog/v2"
 	v1helper "k8s.io/kubernetes/pkg/apis/core/v1/helper"
-	framework "k8s.io/kubernetes/pkg/scheduler/framework/v1alpha1"
+	"k8s.io/kubernetes/pkg/scheduler/framework"
 )
 
 // VolumeZone is a plugin that checks volume zone.
@@ -50,10 +50,10 @@ const (
 )
 
 var volumeZoneLabels = sets.NewString(
-	v1.LabelZoneFailureDomain,
-	v1.LabelZoneRegion,
-	v1.LabelZoneFailureDomainStable,
-	v1.LabelZoneRegionStable,
+	v1.LabelFailureDomainBetaZone,
+	v1.LabelFailureDomainBetaRegion,
+	v1.LabelTopologyZone,
+	v1.LabelTopologyRegion,
 )
 
 // Name returns name of the plugin. It is used in logs, etc.
@@ -112,7 +112,7 @@ func (pl *VolumeZone) Filter(ctx context.Context, _ *framework.CycleState, pod *
 		}
 		pvc, err := pl.pvcLister.PersistentVolumeClaims(pod.Namespace).Get(pvcName)
 		if err != nil {
-			return framework.NewStatus(framework.Error, err.Error())
+			return framework.AsStatus(err)
 		}
 
 		if pvc == nil {
@@ -144,7 +144,7 @@ func (pl *VolumeZone) Filter(ctx context.Context, _ *framework.CycleState, pod *
 
 		pv, err := pl.pvLister.Get(pvName)
 		if err != nil {
-			return framework.NewStatus(framework.Error, err.Error())
+			return framework.AsStatus(err)
 		}
 
 		if pv == nil {
@@ -172,7 +172,7 @@ func (pl *VolumeZone) Filter(ctx context.Context, _ *framework.CycleState, pod *
 }
 
 // New initializes a new plugin and returns it.
-func New(_ runtime.Object, handle framework.FrameworkHandle) (framework.Plugin, error) {
+func New(_ runtime.Object, handle framework.Handle) (framework.Plugin, error) {
 	informerFactory := handle.SharedInformerFactory()
 	pvLister := informerFactory.Core().V1().PersistentVolumes().Lister()
 	pvcLister := informerFactory.Core().V1().PersistentVolumeClaims().Lister()

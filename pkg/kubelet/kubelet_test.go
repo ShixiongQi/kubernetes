@@ -21,13 +21,14 @@ import (
 	"io/ioutil"
 	"os"
 	"sort"
+	"strconv"
 	"testing"
 	"time"
 
 	cadvisorapi "github.com/google/cadvisor/info/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"k8s.io/utils/mount"
+	"k8s.io/mount-utils"
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -67,10 +68,10 @@ import (
 	kubetypes "k8s.io/kubernetes/pkg/kubelet/types"
 	"k8s.io/kubernetes/pkg/kubelet/util/queue"
 	kubeletvolume "k8s.io/kubernetes/pkg/kubelet/volumemanager"
-	schedulerframework "k8s.io/kubernetes/pkg/scheduler/framework/v1alpha1"
+	schedulerframework "k8s.io/kubernetes/pkg/scheduler/framework"
 	"k8s.io/kubernetes/pkg/volume"
 	"k8s.io/kubernetes/pkg/volume/awsebs"
-	"k8s.io/kubernetes/pkg/volume/azure_dd"
+	"k8s.io/kubernetes/pkg/volume/azuredd"
 	"k8s.io/kubernetes/pkg/volume/gcepd"
 	_ "k8s.io/kubernetes/pkg/volume/hostpath"
 	volumetest "k8s.io/kubernetes/pkg/volume/testing"
@@ -180,6 +181,8 @@ func newTestKubeletWithImageList(
 	kubelet.sourcesReady = config.NewSourcesReady(func(_ sets.String) bool { return true })
 	kubelet.masterServiceNamespace = metav1.NamespaceDefault
 	kubelet.serviceLister = testServiceLister{}
+	kubelet.serviceHasSynced = func() bool { return true }
+	kubelet.nodeHasSynced = func() bool { return true }
 	kubelet.nodeLister = testNodeLister{
 		nodes: []*v1.Node{
 			{
@@ -213,14 +216,14 @@ func newTestKubeletWithImageList(
 
 	kubelet.cadvisor = &cadvisortest.Fake{}
 	machineInfo, _ := kubelet.cadvisor.MachineInfo()
-	kubelet.machineInfo = machineInfo
+	kubelet.setCachedMachineInfo(machineInfo)
 
 	fakeMirrorClient := podtest.NewFakeMirrorClient()
 	secretManager := secret.NewSimpleSecretManager(kubelet.kubeClient)
 	kubelet.secretManager = secretManager
 	configMapManager := configmap.NewSimpleConfigMapManager(kubelet.kubeClient)
 	kubelet.configMapManager = configMapManager
-	kubelet.podManager = kubepod.NewBasicPodManager(fakeMirrorClient, kubelet.secretManager, kubelet.configMapManager, podtest.NewMockCheckpointManager())
+	kubelet.podManager = kubepod.NewBasicPodManager(fakeMirrorClient, kubelet.secretManager, kubelet.configMapManager)
 	kubelet.statusManager = status.NewManager(fakeKubeClient, kubelet.podManager, &statustest.FakePodDeletionSafetyProvider{})
 
 	kubelet.containerRuntime = fakeRuntime
@@ -248,13 +251,17 @@ func newTestKubeletWithImageList(
 	volumeStatsAggPeriod := time.Second * 10
 	kubelet.resourceAnalyzer = serverstats.NewResourceAnalyzer(kubelet, volumeStatsAggPeriod)
 
+	fakeHostStatsProvider := stats.NewFakeHostStatsProvider()
+
 	kubelet.StatsProvider = stats.NewCadvisorStatsProvider(
 		kubelet.cadvisor,
 		kubelet.resourceAnalyzer,
 		kubelet.podManager,
 		kubelet.runtimeCache,
 		fakeRuntime,
-		kubelet.statusManager)
+		kubelet.statusManager,
+		fakeHostStatsProvider,
+	)
 	fakeImageGCPolicy := images.ImageGCPolicy{
 		HighThresholdPercent: 90,
 		LowThresholdPercent:  80,
@@ -266,7 +273,7 @@ func newTestKubeletWithImageList(
 		ImageGCManager:   imageGCManager,
 	}
 	kubelet.containerLogManager = logs.NewStubContainerLogManager()
-	containerGCPolicy := kubecontainer.ContainerGCPolicy{
+	containerGCPolicy := kubecontainer.GCPolicy{
 		MinAge:             time.Duration(0),
 		MaxPerPodContainer: 1,
 		MaxContainers:      -1,
@@ -278,7 +285,7 @@ func newTestKubeletWithImageList(
 	fakeClock := clock.NewFakeClock(time.Now())
 	kubelet.backOff = flowcontrol.NewBackOff(time.Second, time.Minute)
 	kubelet.backOff.Clock = fakeClock
-	kubelet.podKillingCh = make(chan *kubecontainer.PodPair, 20)
+	kubelet.podKiller = NewPodKiller(kubelet)
 	kubelet.resyncInterval = 10 * time.Second
 	kubelet.workQueue = queue.NewBasicWorkQueue(fakeClock)
 	// Relist period does not affect the tests.
@@ -306,7 +313,7 @@ func newTestKubeletWithImageList(
 	} else {
 		allPlugins = append(allPlugins, awsebs.ProbeVolumePlugins()...)
 		allPlugins = append(allPlugins, gcepd.ProbeVolumePlugins()...)
-		allPlugins = append(allPlugins, azure_dd.ProbeVolumePlugins()...)
+		allPlugins = append(allPlugins, azuredd.ProbeVolumePlugins()...)
 	}
 
 	var prober volume.DynamicPluginProber // TODO (#51147) inject mock
@@ -353,7 +360,7 @@ func newTestPods(count int) []*v1.Pod {
 				HostNetwork: true,
 			},
 			ObjectMeta: metav1.ObjectMeta{
-				UID:  types.UID(10000 + i),
+				UID:  types.UID(strconv.Itoa(10000 + i)),
 				Name: fmt.Sprintf("pod%d", i),
 			},
 		}
@@ -1400,13 +1407,13 @@ func TestGenerateAPIPodStatusWithSortedContainers(t *testing.T) {
 	kubelet := testKubelet.kubelet
 	numContainers := 10
 	expectedOrder := []string{}
-	cStatuses := []*kubecontainer.ContainerStatus{}
+	cStatuses := []*kubecontainer.Status{}
 	specContainerList := []v1.Container{}
 	for i := 0; i < numContainers; i++ {
 		id := fmt.Sprintf("%v", i)
 		containerName := fmt.Sprintf("%vcontainer", id)
 		expectedOrder = append(expectedOrder, containerName)
-		cStatus := &kubecontainer.ContainerStatus{
+		cStatus := &kubecontainer.Status{
 			ID:   kubecontainer.BuildContainerID("test", id),
 			Name: containerName,
 		}
@@ -1414,7 +1421,7 @@ func TestGenerateAPIPodStatusWithSortedContainers(t *testing.T) {
 		if i%2 == 0 {
 			cStatuses = append(cStatuses, cStatus)
 		} else {
-			cStatuses = append([]*kubecontainer.ContainerStatus{cStatus}, cStatuses...)
+			cStatuses = append([]*kubecontainer.Status{cStatus}, cStatuses...)
 		}
 		specContainerList = append(specContainerList, v1.Container{Name: containerName})
 	}
@@ -1467,7 +1474,7 @@ func TestGenerateAPIPodStatusWithReasonCache(t *testing.T) {
 	}
 	tests := []struct {
 		containers    []v1.Container
-		statuses      []*kubecontainer.ContainerStatus
+		statuses      []*kubecontainer.Status
 		reasons       map[string]error
 		oldStatuses   []v1.ContainerStatus
 		expectedState map[string]v1.ContainerState
@@ -1479,7 +1486,7 @@ func TestGenerateAPIPodStatusWithReasonCache(t *testing.T) {
 		// old status from apiserver.
 		{
 			containers: []v1.Container{{Name: "without-old-record"}, {Name: "with-old-record"}},
-			statuses:   []*kubecontainer.ContainerStatus{},
+			statuses:   []*kubecontainer.Status{},
 			reasons:    map[string]error{},
 			oldStatuses: []v1.ContainerStatus{{
 				Name:                 "with-old-record",
@@ -1508,7 +1515,7 @@ func TestGenerateAPIPodStatusWithReasonCache(t *testing.T) {
 		// For running container, State should be Running, LastTerminationState should be retrieved from latest terminated status.
 		{
 			containers: []v1.Container{{Name: "running"}},
-			statuses: []*kubecontainer.ContainerStatus{
+			statuses: []*kubecontainer.Status{
 				{
 					Name:      "running",
 					State:     kubecontainer.ContainerStateRunning,
@@ -1544,7 +1551,7 @@ func TestGenerateAPIPodStatusWithReasonCache(t *testing.T) {
 		// terminated status.
 		{
 			containers: []v1.Container{{Name: "without-reason"}, {Name: "with-reason"}},
-			statuses: []*kubecontainer.ContainerStatus{
+			statuses: []*kubecontainer.Status{
 				{
 					Name:     "without-reason",
 					State:    kubecontainer.ContainerStateExited,
@@ -1604,6 +1611,38 @@ func TestGenerateAPIPodStatusWithReasonCache(t *testing.T) {
 				}},
 			},
 		},
+		// For Unknown Container Status:
+		// * In certain situations a container can be running and fail to retrieve the status which results in
+		// * a transition to the Unknown state. Prior to this fix, a container would make an invalid transition
+		// * from Running->Waiting. This test validates the correct behavior of transitioning from Running->Terminated.
+		{
+			containers: []v1.Container{{Name: "unknown"}},
+			statuses: []*kubecontainer.Status{
+				{
+					Name:  "unknown",
+					State: kubecontainer.ContainerStateUnknown,
+				},
+				{
+					Name:  "unknown",
+					State: kubecontainer.ContainerStateRunning,
+				},
+			},
+			reasons: map[string]error{},
+			oldStatuses: []v1.ContainerStatus{{
+				Name:  "unknown",
+				State: v1.ContainerState{Running: &v1.ContainerStateRunning{}},
+			}},
+			expectedState: map[string]v1.ContainerState{
+				"unknown": {Terminated: &v1.ContainerStateTerminated{
+					ExitCode: 137,
+					Message:  "The container could not be located when the pod was terminated",
+					Reason:   "ContainerStatusUnknown",
+				}},
+			},
+			expectedLastTerminationState: map[string]v1.ContainerState{
+				"unknown": {Running: &v1.ContainerStateRunning{}},
+			},
+		},
 	}
 
 	for i, test := range tests {
@@ -1649,7 +1688,7 @@ func TestGenerateAPIPodStatusWithDifferentRestartPolicies(t *testing.T) {
 		ID:        pod.UID,
 		Name:      pod.Name,
 		Namespace: pod.Namespace,
-		ContainerStatuses: []*kubecontainer.ContainerStatus{
+		ContainerStatuses: []*kubecontainer.Status{
 			{
 				Name:     "succeed",
 				State:    kubecontainer.ContainerStateExited,
@@ -1952,6 +1991,13 @@ func TestSyncPodKillPod(t *testing.T) {
 	checkPodStatus(t, kl, pod, v1.PodFailed)
 }
 
+func TestPreInitRuntimeService(t *testing.T) {
+	err := PreInitRuntimeService(nil, nil, nil, "", "", "", "", "")
+	if err == nil {
+		t.Fatal("PreInitRuntimeService should fail when not configured with a container runtime")
+	}
+}
+
 func waitForVolumeUnmount(
 	volumeManager kubeletvolume.VolumeManager,
 	pod *v1.Pod) error {
@@ -2031,6 +2077,15 @@ func runVolumeManager(kubelet *Kubelet) chan struct{} {
 	stopCh := make(chan struct{})
 	go kubelet.volumeManager.Run(kubelet.sourcesReady, stopCh)
 	return stopCh
+}
+
+// dirExists returns true if the path exists and represents a directory.
+func dirExists(path string) bool {
+	s, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return s.IsDir()
 }
 
 // Sort pods by UID.

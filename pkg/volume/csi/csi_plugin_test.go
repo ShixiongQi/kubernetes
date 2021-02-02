@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	api "k8s.io/api/core/v1"
 	v1 "k8s.io/api/core/v1"
@@ -62,14 +63,27 @@ func newTestPlugin(t *testing.T, client *fakeclient.Clientset) (*csiPlugin, stri
 	factory := informers.NewSharedInformerFactory(client, CsiResyncPeriod)
 	csiDriverInformer := factory.Storage().V1().CSIDrivers()
 	csiDriverLister := csiDriverInformer.Lister()
-	go factory.Start(wait.NeverStop)
+	volumeAttachmentInformer := factory.Storage().V1().VolumeAttachments()
+	volumeAttachmentLister := volumeAttachmentInformer.Lister()
 
-	host := volumetest.NewFakeVolumeHostWithCSINodeName(t,
+	factory.Start(wait.NeverStop)
+	syncedTypes := factory.WaitForCacheSync(wait.NeverStop)
+	if len(syncedTypes) != 2 {
+		t.Fatalf("informers are not synced")
+	}
+	for ty, ok := range syncedTypes {
+		if !ok {
+			t.Fatalf("failed to sync: %#v", ty)
+		}
+	}
+
+	host := volumetest.NewFakeKubeletVolumeHostWithCSINodeName(t,
 		tmpDir,
 		client,
 		ProbeVolumePlugins(),
 		"fakeNode",
 		csiDriverLister,
+		volumeAttachmentLister,
 	)
 
 	pluginMgr := host.GetPluginMgr()
@@ -82,11 +96,6 @@ func newTestPlugin(t *testing.T, client *fakeclient.Clientset) (*csiPlugin, stri
 	if !ok {
 		t.Fatalf("cannot assert plugin to be type csiPlugin")
 	}
-
-	// Wait until the informer in CSI volume plugin has all CSIDrivers.
-	wait.PollImmediate(TestInformerSyncPeriod, TestInformerSyncTimeout, func() (bool, error) {
-		return csiDriverInformer.Informer().HasSynced(), nil
-	})
 
 	return csiPlug, tmpDir
 }
@@ -875,12 +884,15 @@ func TestPluginNewAttacher(t *testing.T) {
 		t.Fatalf("failed to create new attacher: %v", err)
 	}
 
-	csiAttacher := attacher.(*csiAttacher)
+	csiAttacher := getCsiAttacherFromVolumeAttacher(attacher)
 	if csiAttacher.plugin == nil {
 		t.Error("plugin not set for attacher")
 	}
 	if csiAttacher.k8s == nil {
 		t.Error("Kubernetes client not set for attacher")
+	}
+	if csiAttacher.watchTimeout == time.Duration(0) {
+		t.Error("watch timeout not set for attacher")
 	}
 }
 
@@ -895,12 +907,15 @@ func TestPluginNewDetacher(t *testing.T) {
 		t.Fatalf("failed to create new detacher: %v", err)
 	}
 
-	csiDetacher := detacher.(*csiAttacher)
+	csiDetacher := getCsiAttacherFromVolumeDetacher(detacher)
 	if csiDetacher.plugin == nil {
 		t.Error("plugin not set for detacher")
 	}
 	if csiDetacher.k8s == nil {
 		t.Error("Kubernetes client not set for detacher")
+	}
+	if csiDetacher.watchTimeout == time.Duration(0) {
+		t.Error("watch timeout not set for detacher")
 	}
 }
 
@@ -1012,12 +1027,13 @@ func TestPluginFindAttachablePlugin(t *testing.T) {
 				},
 			)
 			factory := informers.NewSharedInformerFactory(client, CsiResyncPeriod)
-			host := volumetest.NewFakeVolumeHostWithCSINodeName(t,
+			host := volumetest.NewFakeKubeletVolumeHostWithCSINodeName(t,
 				tmpDir,
 				client,
 				ProbeVolumePlugins(),
 				"fakeNode",
 				factory.Storage().V1().CSIDrivers().Lister(),
+				factory.Storage().V1().VolumeAttachments().Lister(),
 			)
 
 			plugMgr := host.GetPluginMgr()
@@ -1137,7 +1153,7 @@ func TestPluginFindDeviceMountablePluginBySpec(t *testing.T) {
 					Spec: v1.NodeSpec{},
 				},
 			)
-			host := volumetest.NewFakeVolumeHostWithCSINodeName(t, tmpDir, client, ProbeVolumePlugins(), "fakeNode", nil)
+			host := volumetest.NewFakeVolumeHostWithCSINodeName(t, tmpDir, client, ProbeVolumePlugins(), "fakeNode", nil, nil)
 			plugMgr := host.GetPluginMgr()
 			plug, err := plugMgr.FindDeviceMountablePluginBySpec(test.spec)
 			if err != nil && !test.shouldFail {

@@ -25,10 +25,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/go-openapi/spec"
 	"sigs.k8s.io/yaml"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -475,7 +479,7 @@ func testHandlerConversion(t *testing.T, enableWatchCache bool) {
 		CountMetricPollPeriod:   time.Minute,
 	}
 	if enableWatchCache {
-		restOptionsGetter.Decorator = genericregistry.StorageWithCacher(100)
+		restOptionsGetter.Decorator = genericregistry.StorageWithCacher()
 	}
 
 	handler, err := NewCustomResourceDefinitionHandler(
@@ -681,4 +685,172 @@ var multiVersionFixture = &apiextensionsv1.CustomResourceDefinition{
 			Plural: "multiversion", Singular: "multiversion", Kind: "MultiVersion", ShortNames: []string{"mv"}, ListKind: "MultiVersionList", Categories: []string{"all"},
 		},
 	},
+}
+
+func Test_defaultDeprecationWarning(t *testing.T) {
+	tests := []struct {
+		name              string
+		deprecatedVersion string
+		crd               apiextensionsv1.CustomResourceDefinitionSpec
+		want              string
+	}{
+		{
+			name:              "no replacement",
+			deprecatedVersion: "v1",
+			crd: apiextensionsv1.CustomResourceDefinitionSpec{
+				Group: "example.com",
+				Names: apiextensionsv1.CustomResourceDefinitionNames{Kind: "Widget"},
+				Versions: []apiextensionsv1.CustomResourceDefinitionVersion{
+					{Name: "v1", Served: true, Deprecated: true},
+					{Name: "v2", Served: true, Deprecated: true},
+					{Name: "v3", Served: false},
+				},
+			},
+			want: "example.com/v1 Widget is deprecated",
+		},
+		{
+			name:              "replacement sorting",
+			deprecatedVersion: "v1",
+			crd: apiextensionsv1.CustomResourceDefinitionSpec{
+				Group: "example.com",
+				Names: apiextensionsv1.CustomResourceDefinitionNames{Kind: "Widget"},
+				Versions: []apiextensionsv1.CustomResourceDefinitionVersion{
+					{Name: "v1", Served: true},
+					{Name: "v1alpha1", Served: true},
+					{Name: "v1alpha2", Served: true},
+					{Name: "v1beta1", Served: true},
+					{Name: "v1beta2", Served: true},
+					{Name: "v2", Served: true},
+					{Name: "v2alpha1", Served: true},
+					{Name: "v2alpha2", Served: true},
+					{Name: "v2beta1", Served: true},
+					{Name: "v2beta2", Served: true},
+					{Name: "v3", Served: false},
+					{Name: "v3alpha1", Served: false},
+					{Name: "v3alpha2", Served: false},
+					{Name: "v3beta1", Served: false},
+					{Name: "v3beta2", Served: false},
+				},
+			},
+			want: "example.com/v1 Widget is deprecated; use example.com/v2 Widget",
+		},
+		{
+			name:              "no newer replacement of equal stability",
+			deprecatedVersion: "v2",
+			crd: apiextensionsv1.CustomResourceDefinitionSpec{
+				Group: "example.com",
+				Names: apiextensionsv1.CustomResourceDefinitionNames{Kind: "Widget"},
+				Versions: []apiextensionsv1.CustomResourceDefinitionVersion{
+					{Name: "v1", Served: true},
+					{Name: "v3", Served: false},
+					{Name: "v3alpha1", Served: true},
+					{Name: "v3beta1", Served: true},
+					{Name: "v4", Served: true, Deprecated: true},
+				},
+			},
+			want: "example.com/v2 Widget is deprecated",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := defaultDeprecationWarning(tt.deprecatedVersion, tt.crd); got != tt.want {
+				t.Errorf("defaultDeprecationWarning() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBuildOpenAPIModelsForApply(t *testing.T) {
+	// This is a list of validation that we expect to work.
+	tests := []apiextensionsv1.CustomResourceValidation{
+		{
+			OpenAPIV3Schema: &apiextensionsv1.JSONSchemaProps{
+				Type:       "object",
+				Properties: map[string]apiextensionsv1.JSONSchemaProps{"num": {Type: "integer", Description: "v1beta1 num field"}},
+			},
+		},
+		{
+			OpenAPIV3Schema: &apiextensionsv1.JSONSchemaProps{
+				Type:         "",
+				XIntOrString: true,
+			},
+		},
+		{
+			OpenAPIV3Schema: &apiextensionsv1.JSONSchemaProps{
+				Type: "object",
+				Properties: map[string]apiextensionsv1.JSONSchemaProps{
+					"oneOf": {
+						OneOf: []apiextensionsv1.JSONSchemaProps{
+							{Type: "boolean"},
+							{Type: "string"},
+						},
+					},
+				},
+			},
+		},
+		{
+			OpenAPIV3Schema: &apiextensionsv1.JSONSchemaProps{
+				Type: "object",
+				Properties: map[string]apiextensionsv1.JSONSchemaProps{
+					"nullable": {
+						Type:     "integer",
+						Nullable: true,
+					},
+				},
+			},
+		},
+	}
+
+	staticSpec, err := getOpenAPISpecFromFile()
+	if err != nil {
+		t.Fatalf("Failed to load openapi spec: %v", err)
+	}
+
+	crd := apiextensionsv1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{Name: "example.stable.example.com", UID: types.UID("12345")},
+		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+			Group: "stable.example.com",
+			Names: apiextensionsv1.CustomResourceDefinitionNames{
+				Plural: "examples", Singular: "example", Kind: "Example", ShortNames: []string{"ex"}, ListKind: "ExampleList", Categories: []string{"all"},
+			},
+			Conversion:            &apiextensionsv1.CustomResourceConversion{Strategy: apiextensionsv1.NoneConverter},
+			Scope:                 apiextensionsv1.ClusterScoped,
+			PreserveUnknownFields: false,
+			Versions: []apiextensionsv1.CustomResourceDefinitionVersion{
+				{
+					Name: "v1beta1", Served: true, Storage: true,
+					Subresources: &apiextensionsv1.CustomResourceSubresources{Status: &apiextensionsv1.CustomResourceSubresourceStatus{}},
+				},
+			},
+		},
+	}
+
+	for _, test := range tests {
+		crd.Spec.Versions[0].Schema = &test
+		if _, err := buildOpenAPIModelsForApply(staticSpec, &crd); err != nil {
+			t.Fatalf("failed to convert to apply model: %v", err)
+		}
+	}
+}
+
+func getOpenAPISpecFromFile() (*spec.Swagger, error) {
+	path := filepath.Join(
+		strings.Repeat(".."+string(filepath.Separator), 6),
+		"api", "openapi-spec", "swagger.json")
+	_, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	byteSpec, err := ioutil.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	staticSpec := &spec.Swagger{}
+
+	err = yaml.Unmarshal(byteSpec, staticSpec)
+	if err != nil {
+		return nil, err
+	}
+
+	return staticSpec, nil
 }

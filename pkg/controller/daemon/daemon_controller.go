@@ -30,6 +30,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
@@ -48,8 +49,8 @@ import (
 	"k8s.io/client-go/util/flowcontrol"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/component-base/metrics/prometheus/ratelimiter"
+	v1helper "k8s.io/component-helpers/scheduling/corev1"
 	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
-	v1helper "k8s.io/kubernetes/pkg/apis/core/v1/helper"
 	"k8s.io/kubernetes/pkg/controller"
 	"k8s.io/kubernetes/pkg/controller/daemon/util"
 	pluginhelper "k8s.io/kubernetes/pkg/scheduler/framework/plugins/helper"
@@ -138,7 +139,7 @@ func NewDaemonSetsController(
 	failedPodsBackoff *flowcontrol.Backoff,
 ) (*DaemonSetsController, error) {
 	eventBroadcaster := record.NewBroadcaster()
-	eventBroadcaster.StartLogging(klog.Infof)
+	eventBroadcaster.StartStructuredLogging(0)
 	eventBroadcaster.StartRecordingToSink(&v1core.EventSinkImpl{Interface: kubeClient.CoreV1().Events("")})
 
 	if kubeClient != nil && kubeClient.CoreV1().RESTClient().GetRateLimiter() != nil {
@@ -162,17 +163,8 @@ func NewDaemonSetsController(
 	}
 
 	daemonSetInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj interface{}) {
-			ds := obj.(*apps.DaemonSet)
-			klog.V(4).Infof("Adding daemon set %s", ds.Name)
-			dsc.enqueueDaemonSet(ds)
-		},
-		UpdateFunc: func(old, cur interface{}) {
-			oldDS := old.(*apps.DaemonSet)
-			curDS := cur.(*apps.DaemonSet)
-			klog.V(4).Infof("Updating daemon set %s", oldDS.Name)
-			dsc.enqueueDaemonSet(curDS)
-		},
+		AddFunc:    dsc.addDaemonset,
+		UpdateFunc: dsc.updateDaemonset,
 		DeleteFunc: dsc.deleteDaemonset,
 	})
 	dsc.dsLister = daemonSetInformer.Lister()
@@ -230,22 +222,59 @@ func indexByPodNodeName(obj interface{}) ([]string, error) {
 	return []string{pod.Spec.NodeName}, nil
 }
 
+func (dsc *DaemonSetsController) addDaemonset(obj interface{}) {
+	ds := obj.(*apps.DaemonSet)
+	klog.V(4).Infof("Adding daemon set %s", ds.Name)
+	dsc.enqueueDaemonSet(ds)
+}
+
+func (dsc *DaemonSetsController) updateDaemonset(cur, old interface{}) {
+	oldDS := old.(*apps.DaemonSet)
+	curDS := cur.(*apps.DaemonSet)
+
+	// TODO: make a KEP and fix informers to always call the delete event handler on re-create
+	if curDS.UID != oldDS.UID {
+		key, err := controller.KeyFunc(oldDS)
+		if err != nil {
+			utilruntime.HandleError(fmt.Errorf("couldn't get key for object %#v: %v", oldDS, err))
+			return
+		}
+		dsc.deleteDaemonset(cache.DeletedFinalStateUnknown{
+			Key: key,
+			Obj: oldDS,
+		})
+	}
+
+	klog.V(4).Infof("Updating daemon set %s", oldDS.Name)
+	dsc.enqueueDaemonSet(curDS)
+}
+
 func (dsc *DaemonSetsController) deleteDaemonset(obj interface{}) {
 	ds, ok := obj.(*apps.DaemonSet)
 	if !ok {
 		tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
 		if !ok {
-			utilruntime.HandleError(fmt.Errorf("Couldn't get object from tombstone %#v", obj))
+			utilruntime.HandleError(fmt.Errorf("couldn't get object from tombstone %#v", obj))
 			return
 		}
 		ds, ok = tombstone.Obj.(*apps.DaemonSet)
 		if !ok {
-			utilruntime.HandleError(fmt.Errorf("Tombstone contained object that is not a DaemonSet %#v", obj))
+			utilruntime.HandleError(fmt.Errorf("tombstone contained object that is not a DaemonSet %#v", obj))
 			return
 		}
 	}
 	klog.V(4).Infof("Deleting daemon set %s", ds.Name)
-	dsc.enqueueDaemonSet(ds)
+
+	key, err := controller.KeyFunc(ds)
+	if err != nil {
+		utilruntime.HandleError(fmt.Errorf("couldn't get key for object %#v: %v", ds, err))
+		return
+	}
+
+	// Delete expectations for the DaemonSet so if we create a new one with the same name it starts clean
+	dsc.expectations.DeleteExpectations(key)
+
+	dsc.queue.Add(key)
 }
 
 // Run begins watching and syncing daemon sets.
@@ -976,10 +1005,12 @@ func (dsc *DaemonSetsController) syncNodes(ds *apps.DaemonSet, podsToDelete, nod
 		go func(ix int) {
 			defer deleteWait.Done()
 			if err := dsc.podControl.DeletePod(ds.Namespace, podsToDelete[ix], ds); err != nil {
-				klog.V(2).Infof("Failed deletion, decrementing expectations for set %q/%q", ds.Namespace, ds.Name)
 				dsc.expectations.DeletionObserved(dsKey)
-				errCh <- err
-				utilruntime.HandleError(err)
+				if !apierrors.IsNotFound(err) {
+					klog.V(2).Infof("Failed deletion, decremented expectations for set %q/%q", ds.Namespace, ds.Name)
+					errCh <- err
+					utilruntime.HandleError(err)
+				}
 			}
 		}(i)
 	}
@@ -1207,10 +1238,10 @@ func (dsc *DaemonSetsController) nodeShouldRunDaemonPod(node *v1.Node, ds *apps.
 
 	if !fitsTaints {
 		// Scheduled daemon pods should continue running if they tolerate NoExecute taint.
-		shouldContinueRunning := v1helper.TolerationsTolerateTaintsWithFilter(pod.Spec.Tolerations, taints, func(t *v1.Taint) bool {
+		_, untolerated := v1helper.FindMatchingUntoleratedTaint(taints, pod.Spec.Tolerations, func(t *v1.Taint) bool {
 			return t.Effect == v1.TaintEffectNoExecute
 		})
-		return false, shouldContinueRunning, nil
+		return false, !untolerated, nil
 	}
 
 	return true, true, nil
@@ -1220,9 +1251,10 @@ func (dsc *DaemonSetsController) nodeShouldRunDaemonPod(node *v1.Node, ds *apps.
 func Predicates(pod *v1.Pod, node *v1.Node, taints []v1.Taint) (fitsNodeName, fitsNodeAffinity, fitsTaints bool) {
 	fitsNodeName = len(pod.Spec.NodeName) == 0 || pod.Spec.NodeName == node.Name
 	fitsNodeAffinity = pluginhelper.PodMatchesNodeSelectorAndAffinityTerms(pod, node)
-	fitsTaints = v1helper.TolerationsTolerateTaintsWithFilter(pod.Spec.Tolerations, taints, func(t *v1.Taint) bool {
+	_, untolerated := v1helper.FindMatchingUntoleratedTaint(taints, pod.Spec.Tolerations, func(t *v1.Taint) bool {
 		return t.Effect == v1.TaintEffectNoExecute || t.Effect == v1.TaintEffectNoSchedule
 	})
+	fitsTaints = !untolerated
 	return
 }
 

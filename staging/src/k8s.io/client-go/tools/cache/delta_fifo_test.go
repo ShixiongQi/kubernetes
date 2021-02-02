@@ -19,6 +19,7 @@ package cache
 import (
 	"fmt"
 	"reflect"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -632,6 +633,15 @@ func TestDeltaFIFO_HasSynced(t *testing.T) {
 			},
 			expectedSynced: true,
 		},
+		{
+			// This test case won't happen in practice since a Reflector, the only producer for delta_fifo today, always passes a complete snapshot consistent in time;
+			// there cannot be duplicate keys in the list or apiserver is broken.
+			actions: []func(f *DeltaFIFO){
+				func(f *DeltaFIFO) { f.Replace([]interface{}{mkFifoObj("a", 1), mkFifoObj("a", 2)}, "0") },
+				func(f *DeltaFIFO) { Pop(f) },
+			},
+			expectedSynced: true,
+		},
 	}
 
 	for i, test := range tests {
@@ -642,6 +652,39 @@ func TestDeltaFIFO_HasSynced(t *testing.T) {
 		}
 		if e, a := test.expectedSynced, f.HasSynced(); a != e {
 			t.Errorf("test case %v failed, expected: %v , got %v", i, e, a)
+		}
+	}
+}
+
+// TestDeltaFIFO_PopShouldUnblockWhenClosed checks that any blocking Pop on an empty queue
+// should unblock and return after Close is called.
+func TestDeltaFIFO_PopShouldUnblockWhenClosed(t *testing.T) {
+	f := NewDeltaFIFOWithOptions(DeltaFIFOOptions{
+		KeyFunction: testFifoObjectKeyFunc,
+		KnownObjects: literalListerGetter(func() []testFifoObject {
+			return []testFifoObject{mkFifoObj("foo", 5)}
+		}),
+	})
+
+	c := make(chan struct{})
+	const jobs = 10
+	for i := 0; i < jobs; i++ {
+		go func() {
+			f.Pop(func(obj interface{}) error {
+				return nil
+			})
+			c <- struct{}{}
+		}()
+	}
+
+	runtime.Gosched()
+	f.Close()
+
+	for i := 0; i < jobs; i++ {
+		select {
+		case <-c:
+		case <-time.After(500 * time.Millisecond):
+			t.Fatalf("timed out waiting for Pop to return after Close")
 		}
 	}
 }

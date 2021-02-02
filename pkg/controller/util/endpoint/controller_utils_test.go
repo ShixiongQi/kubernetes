@@ -100,12 +100,12 @@ func TestDetermineNeededServiceUpdates(t *testing.T) {
 // There are 3*5 possibilities(3 types of RestartPolicy by 5 types of PodPhase).
 // Not listing them all here. Just listing all of the 3 false cases and 3 of the
 // 12 true cases.
-func TestShouldPodBeInEndpoints(t *testing.T) {
+func TestShouldPodBeInEndpointSlice(t *testing.T) {
 	testCases := []struct {
-		name            string
-		pod             *v1.Pod
-		publishNotReady bool
-		expected        bool
+		name               string
+		pod                *v1.Pod
+		expected           bool
+		includeTerminating bool
 	}{
 		// Pod should not be in endpoints:
 		{
@@ -162,7 +162,7 @@ func TestShouldPodBeInEndpoints(t *testing.T) {
 			expected: false,
 		},
 		{
-			name: "Terminating Pod",
+			name: "Terminating Pod with includeTerminating=false",
 			pod: &v1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
 					DeletionTimestamp: &metav1.Time{
@@ -175,8 +175,7 @@ func TestShouldPodBeInEndpoints(t *testing.T) {
 					PodIP: "1.2.3.4",
 				},
 			},
-			publishNotReady: false,
-			expected:        false,
+			expected: false,
 		},
 		// Pod should be in endpoints:
 		{
@@ -245,7 +244,7 @@ func TestShouldPodBeInEndpoints(t *testing.T) {
 			expected: true,
 		},
 		{
-			name: "Terminating Pod with publish not ready",
+			name: "Terminating Pod with includeTerminating=true",
 			pod: &v1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
 					DeletionTimestamp: &metav1.Time{
@@ -258,14 +257,14 @@ func TestShouldPodBeInEndpoints(t *testing.T) {
 					PodIP: "1.2.3.4",
 				},
 			},
-			publishNotReady: true,
-			expected:        true,
+			expected:           true,
+			includeTerminating: true,
 		},
 	}
 
 	for _, test := range testCases {
 		t.Run(test.name, func(t *testing.T) {
-			result := ShouldPodBeInEndpoints(test.pod, test.publishNotReady)
+			result := ShouldPodBeInEndpointSlice(test.pod, test.includeTerminating)
 			if result != test.expected {
 				t.Errorf("expected: %t, got: %t", test.expected, result)
 			}
@@ -497,5 +496,170 @@ func BenchmarkGetPodServiceMemberships(b *testing.B) {
 		if len(services) != len(expect) {
 			b.Errorf("Expect services size %d, but got: %v", len(expect), len(services))
 		}
+	}
+}
+
+func Test_podChanged(t *testing.T) {
+	testCases := []struct {
+		testName      string
+		modifier      func(*v1.Pod, *v1.Pod)
+		podChanged    bool
+		labelsChanged bool
+	}{
+		{
+			testName:      "no changes",
+			modifier:      func(old, new *v1.Pod) {},
+			podChanged:    false,
+			labelsChanged: false,
+		}, {
+			testName: "change NodeName",
+			modifier: func(old, new *v1.Pod) {
+				new.Spec.NodeName = "changed"
+			},
+			// NodeName can only change before the pod has an IP, and we don't care about the
+			// pod yet at that point so we ignore this change
+			podChanged:    false,
+			labelsChanged: false,
+		}, {
+			testName: "change ResourceVersion",
+			modifier: func(old, new *v1.Pod) {
+				new.ObjectMeta.ResourceVersion = "changed"
+			},
+			// ResourceVersion is intentionally ignored if nothing else changed
+			podChanged:    false,
+			labelsChanged: false,
+		}, {
+			testName: "add primary IPv4",
+			modifier: func(old, new *v1.Pod) {
+				new.Status.PodIP = "1.2.3.4"
+				new.Status.PodIPs = []v1.PodIP{{IP: "1.2.3.4"}}
+			},
+			podChanged:    true,
+			labelsChanged: false,
+		}, {
+			testName: "modify primary IPv4",
+			modifier: func(old, new *v1.Pod) {
+				old.Status.PodIP = "1.2.3.4"
+				old.Status.PodIPs = []v1.PodIP{{IP: "1.2.3.4"}}
+				new.Status.PodIP = "2.3.4.5"
+				new.Status.PodIPs = []v1.PodIP{{IP: "2.3.4.5"}}
+			},
+			podChanged:    true,
+			labelsChanged: false,
+		}, {
+			testName: "add primary IPv6",
+			modifier: func(old, new *v1.Pod) {
+				new.Status.PodIP = "fd00:10:96::1"
+				new.Status.PodIPs = []v1.PodIP{{IP: "fd00:10:96::1"}}
+			},
+			podChanged:    true,
+			labelsChanged: false,
+		}, {
+			testName: "modify primary IPv6",
+			modifier: func(old, new *v1.Pod) {
+				old.Status.PodIP = "fd00:10:96::1"
+				old.Status.PodIPs = []v1.PodIP{{IP: "fd00:10:96::1"}}
+				new.Status.PodIP = "fd00:10:96::2"
+				new.Status.PodIPs = []v1.PodIP{{IP: "fd00:10:96::2"}}
+			},
+			podChanged:    true,
+			labelsChanged: false,
+		}, {
+			testName: "add secondary IP",
+			modifier: func(old, new *v1.Pod) {
+				old.Status.PodIP = "1.2.3.4"
+				old.Status.PodIPs = []v1.PodIP{{IP: "1.2.3.4"}}
+				new.Status.PodIP = "1.2.3.4"
+				new.Status.PodIPs = []v1.PodIP{{IP: "1.2.3.4"}, {IP: "fd00:10:96::1"}}
+			},
+			podChanged:    true,
+			labelsChanged: false,
+		}, {
+			testName: "modify secondary IP",
+			modifier: func(old, new *v1.Pod) {
+				old.Status.PodIP = "1.2.3.4"
+				old.Status.PodIPs = []v1.PodIP{{IP: "1.2.3.4"}, {IP: "fd00:10:96::1"}}
+				new.Status.PodIP = "1.2.3.4"
+				new.Status.PodIPs = []v1.PodIP{{IP: "1.2.3.4"}, {IP: "fd00:10:96::2"}}
+			},
+			podChanged:    true,
+			labelsChanged: false,
+		}, {
+			testName: "remove secondary IP",
+			modifier: func(old, new *v1.Pod) {
+				old.Status.PodIP = "1.2.3.4"
+				old.Status.PodIPs = []v1.PodIP{{IP: "1.2.3.4"}, {IP: "fd00:10:96::1"}}
+				new.Status.PodIP = "1.2.3.4"
+				new.Status.PodIPs = []v1.PodIP{{IP: "1.2.3.4"}}
+			},
+			podChanged:    true,
+			labelsChanged: false,
+		}, {
+			testName: "change readiness",
+			modifier: func(old, new *v1.Pod) {
+				new.Status.Conditions[0].Status = v1.ConditionTrue
+			},
+			podChanged:    true,
+			labelsChanged: false,
+		}, {
+			testName: "mark for deletion",
+			modifier: func(old, new *v1.Pod) {
+				now := metav1.NewTime(time.Now().UTC())
+				new.ObjectMeta.DeletionTimestamp = &now
+			},
+			podChanged:    true,
+			labelsChanged: false,
+		}, {
+			testName: "add label",
+			modifier: func(old, new *v1.Pod) {
+				new.Labels["label"] = "new"
+			},
+			podChanged:    false,
+			labelsChanged: true,
+		}, {
+			testName: "modify label",
+			modifier: func(old, new *v1.Pod) {
+				old.Labels["label"] = "old"
+				new.Labels["label"] = "new"
+			},
+			podChanged:    false,
+			labelsChanged: true,
+		}, {
+			testName: "remove label",
+			modifier: func(old, new *v1.Pod) {
+				old.Labels["label"] = "old"
+			},
+			podChanged:    false,
+			labelsChanged: true,
+		},
+	}
+
+	orig := &v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "test",
+			Name:      "pod",
+			Labels:    map[string]string{"foo": "bar"},
+		},
+		Status: v1.PodStatus{
+			Conditions: []v1.PodCondition{
+				{Type: v1.PodReady, Status: v1.ConditionFalse},
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.testName, func(t *testing.T) {
+			old := orig.DeepCopy()
+			new := old.DeepCopy()
+			tc.modifier(old, new)
+
+			podChanged, labelsChanged := podEndpointsChanged(old, new)
+			if podChanged != tc.podChanged {
+				t.Errorf("Expected podChanged to be %t, got %t", tc.podChanged, podChanged)
+			}
+			if labelsChanged != tc.labelsChanged {
+				t.Errorf("Expected labelsChanged to be %t, got %t", tc.labelsChanged, labelsChanged)
+			}
+		})
 	}
 }

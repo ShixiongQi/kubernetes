@@ -171,3 +171,25 @@ func getPVSourceFromSpec(spec *volume.Spec) (*api.CSIPersistentVolumeSource, err
 	}
 	return pvSrc, nil
 }
+
+// GetCSIMounterPath returns the mounter path given the base path.
+func GetCSIMounterPath(path string) string {
+	return filepath.Join(path, "/mount")
+}
+
+// GetCSIDriverName returns the csi driver name
+func GetCSIDriverName(spec *volume.Spec) (string, error) {
+	volSrc, pvSrc, err := getSourceFromSpec(spec)
+	if err != nil {
+		return "", err
+	}
+
+	switch {
+	case volSrc != nil && utilfeature.DefaultFeatureGate.Enabled(features.CSIInlineVolume):
+		return volSrc.Driver, nil
+	case pvSrc != nil:
+		return pvSrc.Driver, nil
+	default:
+		return "", errors.New(log("volume source not found in volume.Spec"))
+	}
+}

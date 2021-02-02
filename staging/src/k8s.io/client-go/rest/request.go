@@ -88,6 +88,8 @@ var noBackoff = &NoBackoff{}
 type Request struct {
 	c *RESTClient
 
+	warningHandler WarningHandler
+
 	rateLimiter flowcontrol.RateLimiter
 	backoff     BackoffManager
 	timeout     time.Duration
@@ -135,12 +137,13 @@ func NewRequest(c *RESTClient) *Request {
 	}
 
 	r := &Request{
-		c:           c,
-		rateLimiter: c.rateLimiter,
-		backoff:     backoff,
-		timeout:     timeout,
-		pathPrefix:  pathPrefix,
-		maxRetries:  10,
+		c:              c,
+		rateLimiter:    c.rateLimiter,
+		backoff:        backoff,
+		timeout:        timeout,
+		pathPrefix:     pathPrefix,
+		maxRetries:     10,
+		warningHandler: c.warningHandler,
 	}
 
 	switch {
@@ -215,6 +218,13 @@ func (r *Request) BackOff(manager BackoffManager) *Request {
 	}
 
 	r.backoff = manager
+	return r
+}
+
+// WarningHandler sets the handler this client uses when warning headers are encountered.
+// If set to nil, this client will use the default warning handler (see SetDefaultWarningHandler).
+func (r *Request) WarningHandler(handler WarningHandler) *Request {
+	r.warningHandler = handler
 	return r
 }
 
@@ -501,13 +511,23 @@ func (r Request) finalURLTemplate() url.URL {
 	}
 	r.params = newParams
 	url := r.URL()
-	segments := strings.Split(r.URL().Path, "/")
+
+	segments := strings.Split(url.Path, "/")
 	groupIndex := 0
 	index := 0
-	if r.URL() != nil && r.c.base != nil && strings.Contains(r.URL().Path, r.c.base.Path) {
-		groupIndex += len(strings.Split(r.c.base.Path, "/"))
+	trimmedBasePath := ""
+	if url != nil && r.c.base != nil && strings.Contains(url.Path, r.c.base.Path) {
+		p := strings.TrimPrefix(url.Path, r.c.base.Path)
+		if !strings.HasPrefix(p, "/") {
+			p = "/" + p
+		}
+		// store the base path that we have trimmed so we can append it
+		// before returning the URL
+		trimmedBasePath = r.c.base.Path
+		segments = strings.Split(p, "/")
+		groupIndex = 1
 	}
-	if groupIndex >= len(segments) {
+	if len(segments) <= 2 {
 		return *url
 	}
 
@@ -553,7 +573,7 @@ func (r Request) finalURLTemplate() url.URL {
 			segments[index+3] = "{name}"
 		}
 	}
-	url.Path = path.Join(segments...)
+	url.Path = path.Join(trimmedBasePath, path.Join(segments...))
 	return *url
 }
 
@@ -628,7 +648,7 @@ func (b *throttledLogger) attemptToLog() (klog.Level, bool) {
 	return -1, false
 }
 
-// Infof will write a log message at each logLevel specified by the reciever's throttleSettings
+// Infof will write a log message at each logLevel specified by the receiver's throttleSettings
 // as long as it hasn't written a log message more recently than minLogInterval.
 func (b *throttledLogger) Infof(message string, args ...interface{}) {
 	if logLevel, ok := b.attemptToLog(); ok {
@@ -691,6 +711,8 @@ func (r *Request) Watch(ctx context.Context) (watch.Interface, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	handleWarnings(resp.Header, r.warningHandler)
 
 	frameReader := framer.NewFrameReader(resp.Body)
 	watchEventDecoder := streaming.NewDecoder(frameReader, streamingSerializer)
@@ -764,6 +786,7 @@ func (r *Request) Stream(ctx context.Context) (io.ReadCloser, error) {
 
 	switch {
 	case (resp.StatusCode >= 200) && (resp.StatusCode < 300):
+		handleWarnings(resp.Header, r.warningHandler)
 		return resp.Body, nil
 
 	default:
@@ -1020,6 +1043,7 @@ func (r *Request) transformResponse(resp *http.Response, req *http.Request) Resu
 				body:        body,
 				contentType: contentType,
 				statusCode:  resp.StatusCode,
+				warnings:    handleWarnings(resp.Header, r.warningHandler),
 			}
 		}
 	}
@@ -1038,6 +1062,7 @@ func (r *Request) transformResponse(resp *http.Response, req *http.Request) Resu
 			statusCode:  resp.StatusCode,
 			decoder:     decoder,
 			err:         err,
+			warnings:    handleWarnings(resp.Header, r.warningHandler),
 		}
 	}
 
@@ -1046,6 +1071,7 @@ func (r *Request) transformResponse(resp *http.Response, req *http.Request) Resu
 		contentType: contentType,
 		statusCode:  resp.StatusCode,
 		decoder:     decoder,
+		warnings:    handleWarnings(resp.Header, r.warningHandler),
 	}
 }
 
@@ -1181,6 +1207,7 @@ func retryAfterSeconds(resp *http.Response) (int, bool) {
 // Result contains the result of calling Request.Do().
 type Result struct {
 	body        []byte
+	warnings    []net.WarningHeader
 	contentType string
 	err         error
 	statusCode  int
@@ -1292,6 +1319,11 @@ func (r Result) Error() error {
 		}
 	}
 	return r.err
+}
+
+// Warnings returns any warning headers received in the response
+func (r Result) Warnings() []net.WarningHeader {
+	return r.warnings
 }
 
 // NameMayNotBe specifies strings that cannot be used as names specified as path segments (like the REST API or etcd store)

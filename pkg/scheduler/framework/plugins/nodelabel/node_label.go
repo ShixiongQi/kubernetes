@@ -24,7 +24,8 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/kubernetes/pkg/scheduler/apis/config"
-	framework "k8s.io/kubernetes/pkg/scheduler/framework/v1alpha1"
+	"k8s.io/kubernetes/pkg/scheduler/apis/config/validation"
+	"k8s.io/kubernetes/pkg/scheduler/framework"
 )
 
 // Name of this plugin.
@@ -35,32 +36,17 @@ const (
 	ErrReasonPresenceViolated = "node(s) didn't have the requested labels"
 )
 
-// validateArgs validates that presentLabels and absentLabels do not conflict.
-func validateNoConflict(presentLabels []string, absentLabels []string) error {
-	m := make(map[string]struct{}, len(presentLabels))
-	for _, l := range presentLabels {
-		m[l] = struct{}{}
-	}
-	for _, l := range absentLabels {
-		if _, ok := m[l]; ok {
-			return fmt.Errorf("detecting at least one label (e.g., %q) that exist in both the present(%+v) and absent(%+v) label list", l, presentLabels, absentLabels)
-		}
-	}
-	return nil
-}
-
 // New initializes a new plugin and returns it.
-func New(plArgs runtime.Object, handle framework.FrameworkHandle) (framework.Plugin, error) {
+func New(plArgs runtime.Object, handle framework.Handle) (framework.Plugin, error) {
 	args, err := getArgs(plArgs)
 	if err != nil {
 		return nil, err
 	}
-	if err := validateNoConflict(args.PresentLabels, args.AbsentLabels); err != nil {
+
+	if err := validation.ValidateNodeLabelArgs(args); err != nil {
 		return nil, err
 	}
-	if err := validateNoConflict(args.PresentLabelsPreference, args.AbsentLabelsPreference); err != nil {
-		return nil, err
-	}
+
 	return &NodeLabel{
 		handle: handle,
 		args:   args,
@@ -77,7 +63,7 @@ func getArgs(obj runtime.Object) (config.NodeLabelArgs, error) {
 
 // NodeLabel checks whether a pod can fit based on the node labels which match a filter that it requests.
 type NodeLabel struct {
-	handle framework.FrameworkHandle
+	handle framework.Handle
 	args   config.NodeLabelArgs
 }
 
@@ -123,8 +109,8 @@ func (pl *NodeLabel) Filter(ctx context.Context, _ *framework.CycleState, pod *v
 // Score invoked at the score extension point.
 func (pl *NodeLabel) Score(ctx context.Context, state *framework.CycleState, pod *v1.Pod, nodeName string) (int64, *framework.Status) {
 	nodeInfo, err := pl.handle.SnapshotSharedLister().NodeInfos().Get(nodeName)
-	if err != nil || nodeInfo.Node() == nil {
-		return 0, framework.NewStatus(framework.Error, fmt.Sprintf("getting node %q from Snapshot: %v, node is nil: %v", nodeName, err, nodeInfo.Node() == nil))
+	if err != nil {
+		return 0, framework.AsStatus(fmt.Errorf("getting node %q from Snapshot: %w", nodeName, err))
 	}
 
 	node := nodeInfo.Node()

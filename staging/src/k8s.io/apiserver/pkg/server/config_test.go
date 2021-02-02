@@ -155,6 +155,7 @@ func TestNewWithDelegate(t *testing.T) {
 		"/healthz/ping",
 		"/healthz/poststarthook/delegate-post-start-hook",
 		"/healthz/poststarthook/generic-apiserver-start-informers",
+		"/healthz/poststarthook/max-in-flight-filter",
 		"/healthz/poststarthook/wrapping-post-start-hook",
 		"/healthz/wrapping-health",
 		"/livez",
@@ -163,14 +164,17 @@ func TestNewWithDelegate(t *testing.T) {
 		"/livez/ping",
 		"/livez/poststarthook/delegate-post-start-hook",
 		"/livez/poststarthook/generic-apiserver-start-informers",
+		"/livez/poststarthook/max-in-flight-filter",
 		"/livez/poststarthook/wrapping-post-start-hook",
 		"/metrics",
 		"/readyz",
 		"/readyz/delegate-health",
+		"/readyz/informer-sync",
 		"/readyz/log",
 		"/readyz/ping",
 		"/readyz/poststarthook/delegate-post-start-hook",
 		"/readyz/poststarthook/generic-apiserver-start-informers",
+		"/readyz/poststarthook/max-in-flight-filter",
 		"/readyz/poststarthook/wrapping-post-start-hook",
 		"/readyz/shutdown",
 	}
@@ -180,6 +184,7 @@ func TestNewWithDelegate(t *testing.T) {
 [-]wrapping-health failed: reason withheld
 [-]delegate-health failed: reason withheld
 [+]poststarthook/generic-apiserver-start-informers ok
+[+]poststarthook/max-in-flight-filter ok
 [+]poststarthook/delegate-post-start-hook ok
 [+]poststarthook/wrapping-post-start-hook ok
 healthz check failed
@@ -242,10 +247,10 @@ func checkExpectedPathsAtRoot(url string, expectedPaths []string, t *testing.T) 
 			pathset.Insert(p.(string))
 		}
 		expectedset := sets.NewString(expectedPaths...)
-		for _, p := range pathset.Difference(expectedset) {
+		for p := range pathset.Difference(expectedset) {
 			t.Errorf("Got %v path, which we did not expect", p)
 		}
-		for _, p := range expectedset.Difference(pathset) {
+		for p := range expectedset.Difference(pathset) {
 			t.Errorf(" Expected %v path which we did not get", p)
 		}
 	})

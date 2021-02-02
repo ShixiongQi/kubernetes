@@ -104,10 +104,10 @@ type AuthInfo struct {
 	ClientKey string `json:"client-key,omitempty"`
 	// ClientKeyData contains PEM-encoded data from a client key file for TLS. Overrides ClientKey
 	// +optional
-	ClientKeyData []byte `json:"client-key-data,omitempty"`
+	ClientKeyData []byte `json:"client-key-data,omitempty" datapolicy:"security-key"`
 	// Token is the bearer token for authentication to the kubernetes cluster.
 	// +optional
-	Token string `json:"token,omitempty"`
+	Token string `json:"token,omitempty" datapolicy:"token"`
 	// TokenFile is a pointer to a file that contains a bearer token (as described above).  If both Token and TokenFile are present, Token takes precedence.
 	// +optional
 	TokenFile string `json:"tokenFile,omitempty"`
@@ -125,7 +125,7 @@ type AuthInfo struct {
 	Username string `json:"username,omitempty"`
 	// Password is the password for basic authentication to the kubernetes cluster.
 	// +optional
-	Password string `json:"password,omitempty"`
+	Password string `json:"password,omitempty" datapolicy:"password"`
 	// AuthProvider specifies a custom authentication plugin for the kubernetes cluster.
 	// +optional
 	AuthProvider *AuthProviderConfig `json:"auth-provider,omitempty"`
@@ -192,7 +192,7 @@ type AuthProviderConfig struct {
 // ExecConfig specifies a command to provide client credentials. The command is exec'd
 // and outputs structured stdout holding credentials.
 //
-// See the client.authentiction.k8s.io API group for specifications of the exact input
+// See the client.authentication.k8s.io API group for specifications of the exact input
 // and output format
 type ExecConfig struct {
 	// Command to execute.
@@ -209,6 +209,18 @@ type ExecConfig struct {
 	// Preferred input version of the ExecInfo. The returned ExecCredentials MUST use
 	// the same encoding version as the input.
 	APIVersion string `json:"apiVersion,omitempty"`
+
+	// This text is shown to the user when the executable doesn't seem to be
+	// present. For example, `brew install foo-cli` might be a good InstallHint for
+	// foo-cli on Mac OS systems.
+	InstallHint string `json:"installHint,omitempty"`
+
+	// ProvideClusterInfo determines whether or not to provide cluster information,
+	// which could potentially contain very large CA data, to this exec plugin as a
+	// part of the KUBERNETES_EXEC_INFO environment variable. By default, it is set
+	// to false. Package k8s.io/client-go/tools/auth/exec provides helper methods for
+	// reading this environment variable.
+	ProvideClusterInfo bool `json:"provideClusterInfo"`
 }
 
 // ExecEnvVar is used for setting environment variables when executing an exec-based

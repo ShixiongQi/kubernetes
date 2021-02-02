@@ -257,11 +257,6 @@ func (r *ControllerExpectations) DeletionObserved(controllerKey string) {
 	r.LowerExpectations(controllerKey, 0, 1)
 }
 
-// Expectations are either fulfilled, or expire naturally.
-type Expectations interface {
-	Fulfilled() bool
-}
-
 // ControlleeExpectations track controllee creates/deletes.
 type ControlleeExpectations struct {
 	// Important: Since these two int64 fields are using sync/atomic, they have to be at the top of the struct due to a bug on 32-bit platforms
@@ -601,8 +596,12 @@ func (r RealPodControl) DeletePod(namespace string, podID string, object runtime
 	if err != nil {
 		return fmt.Errorf("object does not have ObjectMeta, %v", err)
 	}
-	klog.V(2).Infof("Controller %v deleting pod %v/%v", accessor.GetName(), namespace, podID)
-	if err := r.KubeClient.CoreV1().Pods(namespace).Delete(context.TODO(), podID, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+	klog.V(2).InfoS("Deleting pod", "controller", accessor.GetName(), "pod", klog.KRef(namespace, podID))
+	if err := r.KubeClient.CoreV1().Pods(namespace).Delete(context.TODO(), podID, metav1.DeleteOptions{}); err != nil {
+		if apierrors.IsNotFound(err) {
+			klog.V(4).Infof("pod %v/%v has already been deleted.", namespace, podID)
+			return err
+		}
 		r.Recorder.Eventf(object, v1.EventTypeWarning, FailedDeletePodReason, "Error deleting: %v", err)
 		return fmt.Errorf("unable to delete pods: %v", err)
 	}

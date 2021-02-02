@@ -17,19 +17,26 @@ limitations under the License.
 package apiserver
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/apimachinery/pkg/util/wait"
+	genericfeatures "k8s.io/apiserver/pkg/features"
 	genericapiserver "k8s.io/apiserver/pkg/server"
 	"k8s.io/apiserver/pkg/server/egressselector"
 	serverstorage "k8s.io/apiserver/pkg/server/storage"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/pkg/version"
 	openapicommon "k8s.io/kube-openapi/pkg/common"
 
+	"k8s.io/apiserver/pkg/server/dynamiccertificates"
 	v1 "k8s.io/kube-aggregator/pkg/apis/apiregistration/v1"
 	v1helper "k8s.io/kube-aggregator/pkg/apis/apiregistration/v1/helper"
 	"k8s.io/kube-aggregator/pkg/apis/apiregistration/v1beta1"
@@ -64,8 +71,8 @@ const legacyAPIServiceName = "v1."
 type ExtraConfig struct {
 	// ProxyClientCert/Key are the client cert used to identify this proxy. Backing APIServices use
 	// this to confirm the proxy's identity
-	ProxyClientCert []byte
-	ProxyClientKey  []byte
+	ProxyClientCertFile string
+	ProxyClientKeyFile  string
 
 	// If present, the Dial method will be used for dialing out to delegate
 	// apiservers.
@@ -108,11 +115,9 @@ type APIAggregator struct {
 
 	delegateHandler http.Handler
 
-	// proxyClientCert/Key are the client cert used to identify this proxy. Backing APIServices use
-	// this to confirm the proxy's identity
-	proxyClientCert []byte
-	proxyClientKey  []byte
-	proxyTransport  *http.Transport
+	// proxyCurrentCertKeyContent holds he client cert used to identify this proxy. Backing APIServices use this to confirm the proxy's identity
+	proxyCurrentCertKeyContent certKeyFunc
+	proxyTransport             *http.Transport
 
 	// proxyHandlers are the proxy handlers that are currently registered, keyed by apiservice.name
 	proxyHandlers map[string]*proxyHandler
@@ -158,11 +163,6 @@ func (cfg *Config) Complete() CompletedConfig {
 
 // NewWithDelegate returns a new instance of APIAggregator from the given config.
 func (c completedConfig) NewWithDelegate(delegationTarget genericapiserver.DelegationTarget) (*APIAggregator, error) {
-	// Prevent generic API server to install OpenAPI handler. Aggregator server
-	// has its own customized OpenAPI handler.
-	openAPIConfig := c.GenericConfig.OpenAPIConfig
-	c.GenericConfig.OpenAPIConfig = nil
-
 	genericServer, err := c.GenericConfig.New("kube-aggregator", delegationTarget)
 	if err != nil {
 		return nil, err
@@ -178,18 +178,17 @@ func (c completedConfig) NewWithDelegate(delegationTarget genericapiserver.Deleg
 	)
 
 	s := &APIAggregator{
-		GenericAPIServer:         genericServer,
-		delegateHandler:          delegationTarget.UnprotectedHandler(),
-		proxyClientCert:          c.ExtraConfig.ProxyClientCert,
-		proxyClientKey:           c.ExtraConfig.ProxyClientKey,
-		proxyTransport:           c.ExtraConfig.ProxyTransport,
-		proxyHandlers:            map[string]*proxyHandler{},
-		handledGroups:            sets.String{},
-		lister:                   informerFactory.Apiregistration().V1().APIServices().Lister(),
-		APIRegistrationInformers: informerFactory,
-		serviceResolver:          c.ExtraConfig.ServiceResolver,
-		openAPIConfig:            openAPIConfig,
-		egressSelector:           c.GenericConfig.EgressSelector,
+		GenericAPIServer:           genericServer,
+		delegateHandler:            delegationTarget.UnprotectedHandler(),
+		proxyTransport:             c.ExtraConfig.ProxyTransport,
+		proxyHandlers:              map[string]*proxyHandler{},
+		handledGroups:              sets.String{},
+		lister:                     informerFactory.Apiregistration().V1().APIServices().Lister(),
+		APIRegistrationInformers:   informerFactory,
+		serviceResolver:            c.ExtraConfig.ServiceResolver,
+		openAPIConfig:              c.GenericConfig.OpenAPIConfig,
+		egressSelector:             c.GenericConfig.EgressSelector,
+		proxyCurrentCertKeyContent: func() (bytes []byte, bytes2 []byte) { return nil, nil },
 	}
 
 	apiGroupInfo := apiservicerest.NewRESTStorage(c.GenericConfig.MergedResourceConfig, c.GenericConfig.RESTOptionsGetter)
@@ -214,14 +213,30 @@ func (c completedConfig) NewWithDelegate(delegationTarget genericapiserver.Deleg
 	s.GenericAPIServer.Handler.NonGoRestfulMux.UnlistedHandle("/apis/", apisHandler)
 
 	apiserviceRegistrationController := NewAPIServiceRegistrationController(informerFactory.Apiregistration().V1().APIServices(), s)
+	if len(c.ExtraConfig.ProxyClientCertFile) > 0 && len(c.ExtraConfig.ProxyClientKeyFile) > 0 {
+		aggregatorProxyCerts, err := dynamiccertificates.NewDynamicServingContentFromFiles("aggregator-proxy-cert", c.ExtraConfig.ProxyClientCertFile, c.ExtraConfig.ProxyClientKeyFile)
+		if err != nil {
+			return nil, err
+		}
+		if err := aggregatorProxyCerts.RunOnce(); err != nil {
+			return nil, err
+		}
+		aggregatorProxyCerts.AddListener(apiserviceRegistrationController)
+		s.proxyCurrentCertKeyContent = aggregatorProxyCerts.CurrentCertKeyContent
+
+		s.GenericAPIServer.AddPostStartHookOrDie("aggregator-reload-proxy-client-cert", func(context genericapiserver.PostStartHookContext) error {
+			go aggregatorProxyCerts.Run(1, context.StopCh)
+			return nil
+		})
+	}
+
 	availableController, err := statuscontrollers.NewAvailableConditionController(
 		informerFactory.Apiregistration().V1().APIServices(),
 		c.GenericConfig.SharedInformerFactory.Core().V1().Services(),
 		c.GenericConfig.SharedInformerFactory.Core().V1().Endpoints(),
 		apiregistrationClient.ApiregistrationV1(),
 		c.ExtraConfig.ProxyTransport,
-		c.ExtraConfig.ProxyClientCert,
-		c.ExtraConfig.ProxyClientKey,
+		(func() ([]byte, []byte))(s.proxyCurrentCertKeyContent),
 		s.serviceResolver,
 		c.GenericConfig.EgressSelector,
 	)
@@ -249,6 +264,56 @@ func (c completedConfig) NewWithDelegate(delegationTarget genericapiserver.Deleg
 		go availableController.Run(5, context.StopCh)
 		return nil
 	})
+
+	if utilfeature.DefaultFeatureGate.Enabled(genericfeatures.StorageVersionAPI) &&
+		utilfeature.DefaultFeatureGate.Enabled(genericfeatures.APIServerIdentity) {
+		// Spawn a goroutine in aggregator apiserver to update storage version for
+		// all built-in resources
+		s.GenericAPIServer.AddPostStartHookOrDie("built-in-resources-storage-version-updater", func(hookContext genericapiserver.PostStartHookContext) error {
+			// Wait for apiserver-identity to exist first before updating storage
+			// versions, to avoid storage version GC accidentally garbage-collecting
+			// storage versions.
+			kubeClient, err := kubernetes.NewForConfig(hookContext.LoopbackClientConfig)
+			if err != nil {
+				return err
+			}
+			if err := wait.PollImmediateUntil(100*time.Millisecond, func() (bool, error) {
+				_, err := kubeClient.CoordinationV1().Leases(metav1.NamespaceSystem).Get(
+					context.TODO(), s.GenericAPIServer.APIServerID, metav1.GetOptions{})
+				if apierrors.IsNotFound(err) {
+					return false, nil
+				}
+				if err != nil {
+					return false, err
+				}
+				return true, nil
+			}, hookContext.StopCh); err != nil {
+				return fmt.Errorf("failed to wait for apiserver-identity lease %s to be created: %v",
+					s.GenericAPIServer.APIServerID, err)
+			}
+			// Technically an apiserver only needs to update storage version once during bootstrap.
+			// Reconcile StorageVersion objects every 10 minutes will help in the case that the
+			// StorageVersion objects get accidentally modified/deleted by a different agent. In that
+			// case, the reconciliation ensures future storage migration still works. If nothing gets
+			// changed, the reconciliation update is a noop and gets short-circuited by the apiserver,
+			// therefore won't change the resource version and trigger storage migration.
+			go wait.PollImmediateUntil(10*time.Minute, func() (bool, error) {
+				// All apiservers (aggregator-apiserver, kube-apiserver, apiextensions-apiserver)
+				// share the same generic apiserver config. The same StorageVersion manager is used
+				// to register all built-in resources when the generic apiservers install APIs.
+				s.GenericAPIServer.StorageVersionManager.UpdateStorageVersions(hookContext.LoopbackClientConfig, s.GenericAPIServer.APIServerID)
+				return false, nil
+			}, hookContext.StopCh)
+			// Once the storage version updater finishes the first round of update,
+			// the PostStartHook will return to unblock /healthz. The handler chain
+			// won't block write requests anymore. Check every second since it's not
+			// expensive.
+			wait.PollImmediateUntil(1*time.Second, func() (bool, error) {
+				return s.GenericAPIServer.StorageVersionManager.Completed(), nil
+			}, hookContext.StopCh)
+			return nil
+		})
+	}
 
 	return s, nil
 }
@@ -309,12 +374,11 @@ func (s *APIAggregator) AddAPIService(apiService *v1.APIService) error {
 
 	// register the proxy handler
 	proxyHandler := &proxyHandler{
-		localDelegate:   s.delegateHandler,
-		proxyClientCert: s.proxyClientCert,
-		proxyClientKey:  s.proxyClientKey,
-		proxyTransport:  s.proxyTransport,
-		serviceResolver: s.serviceResolver,
-		egressSelector:  s.egressSelector,
+		localDelegate:              s.delegateHandler,
+		proxyCurrentCertKeyContent: s.proxyCurrentCertKeyContent,
+		proxyTransport:             s.proxyTransport,
+		serviceResolver:            s.serviceResolver,
+		egressSelector:             s.egressSelector,
 	}
 	proxyHandler.updateAPIService(apiService)
 	if s.openAPIAggregationController != nil {

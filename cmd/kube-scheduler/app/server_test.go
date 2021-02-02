@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"io/ioutil"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -73,7 +74,7 @@ users:
 	// plugin config
 	pluginConfigFile := filepath.Join(tmpDir, "plugin.yaml")
 	if err := ioutil.WriteFile(pluginConfigFile, []byte(fmt.Sprintf(`
-apiVersion: kubescheduler.config.k8s.io/v1alpha2
+apiVersion: kubescheduler.config.k8s.io/v1beta1
 kind: KubeSchedulerConfiguration
 clientConnection:
   kubeconfig: "%s"
@@ -110,7 +111,7 @@ profiles:
 	// multiple profiles config
 	multiProfilesConfig := filepath.Join(tmpDir, "multi-profiles.yaml")
 	if err := ioutil.WriteFile(multiProfilesConfig, []byte(fmt.Sprintf(`
-apiVersion: kubescheduler.config.k8s.io/v1alpha2
+apiVersion: kubescheduler.config.k8s.io/v1beta1
 kind: KubeSchedulerConfiguration
 clientConnection:
   kubeconfig: "%s"
@@ -122,6 +123,9 @@ profiles:
       disabled:
       - name: "*"
     filter:
+      disabled:
+      - name: "*"
+    postFilter:
       disabled:
       - name: "*"
     preScore:
@@ -154,31 +158,35 @@ profiles:
 		"PreFilterPlugin": {
 			{Name: "NodeResourcesFit"},
 			{Name: "NodePorts"},
-			{Name: "InterPodAffinity"},
 			{Name: "PodTopologySpread"},
+			{Name: "InterPodAffinity"},
+			{Name: "VolumeBinding"},
 		},
 		"FilterPlugin": {
 			{Name: "NodeUnschedulable"},
-			{Name: "NodeResourcesFit"},
 			{Name: "NodeName"},
-			{Name: "NodePorts"},
-			{Name: "NodeAffinity"},
-			{Name: "VolumeRestrictions"},
 			{Name: "TaintToleration"},
+			{Name: "NodeAffinity"},
+			{Name: "NodePorts"},
+			{Name: "NodeResourcesFit"},
+			{Name: "VolumeRestrictions"},
 			{Name: "EBSLimits"},
 			{Name: "GCEPDLimits"},
 			{Name: "NodeVolumeLimits"},
 			{Name: "AzureDiskLimits"},
 			{Name: "VolumeBinding"},
 			{Name: "VolumeZone"},
-			{Name: "InterPodAffinity"},
 			{Name: "PodTopologySpread"},
+			{Name: "InterPodAffinity"},
+		},
+		"PostFilterPlugin": {
+			{Name: "DefaultPreemption"},
 		},
 		"PreScorePlugin": {
 			{Name: "InterPodAffinity"},
-			{Name: "DefaultPodTopologySpread"},
-			{Name: "TaintToleration"},
 			{Name: "PodTopologySpread"},
+			{Name: "TaintToleration"},
+			{Name: "NodeAffinity"},
 		},
 		"ScorePlugin": {
 			{Name: "NodeResourcesBalancedAllocation", Weight: 1},
@@ -187,15 +195,12 @@ profiles:
 			{Name: "NodeResourcesLeastAllocated", Weight: 1},
 			{Name: "NodeAffinity", Weight: 1},
 			{Name: "NodePreferAvoidPods", Weight: 10000},
-			{Name: "DefaultPodTopologySpread", Weight: 1},
+			{Name: "PodTopologySpread", Weight: 2},
 			{Name: "TaintToleration", Weight: 1},
-			{Name: "PodTopologySpread", Weight: 1},
 		},
-		"BindPlugin":      {{Name: "DefaultBinder"}},
-		"ReservePlugin":   {{Name: "VolumeBinding"}},
-		"UnreservePlugin": {{Name: "VolumeBinding"}},
-		"PreBindPlugin":   {{Name: "VolumeBinding"}},
-		"PostBindPlugin":  {{Name: "VolumeBinding"}},
+		"BindPlugin":    {{Name: "DefaultBinder"}},
+		"ReservePlugin": {{Name: "VolumeBinding"}},
+		"PreBindPlugin": {{Name: "VolumeBinding"}},
 	}
 
 	testcases := []struct {
@@ -220,16 +225,15 @@ profiles:
 			},
 			wantPlugins: map[string]map[string][]kubeschedulerconfig.Plugin{
 				"default-scheduler": {
-					"BindPlugin":      {{Name: "DefaultBinder"}},
-					"FilterPlugin":    {{Name: "NodeResourcesFit"}, {Name: "NodePorts"}},
-					"PreFilterPlugin": {{Name: "NodeResourcesFit"}, {Name: "NodePorts"}},
-					"PreScorePlugin":  {{Name: "InterPodAffinity"}, {Name: "TaintToleration"}},
-					"QueueSortPlugin": {{Name: "PrioritySort"}},
-					"ScorePlugin":     {{Name: "InterPodAffinity", Weight: 1}, {Name: "TaintToleration", Weight: 1}},
-					"ReservePlugin":   {{Name: "VolumeBinding"}},
-					"UnreservePlugin": {{Name: "VolumeBinding"}},
-					"PreBindPlugin":   {{Name: "VolumeBinding"}},
-					"PostBindPlugin":  {{Name: "VolumeBinding"}},
+					"BindPlugin":       {{Name: "DefaultBinder"}},
+					"FilterPlugin":     {{Name: "NodeResourcesFit"}, {Name: "NodePorts"}},
+					"PreFilterPlugin":  {{Name: "NodeResourcesFit"}, {Name: "NodePorts"}},
+					"PostFilterPlugin": {{Name: "DefaultPreemption"}},
+					"PreScorePlugin":   {{Name: "InterPodAffinity"}, {Name: "TaintToleration"}},
+					"QueueSortPlugin":  {{Name: "PrioritySort"}},
+					"ScorePlugin":      {{Name: "InterPodAffinity", Weight: 1}, {Name: "TaintToleration", Weight: 1}},
+					"ReservePlugin":    {{Name: "VolumeBinding"}},
+					"PreBindPlugin":    {{Name: "VolumeBinding"}},
 				},
 			},
 		},
@@ -245,9 +249,7 @@ profiles:
 					"BindPlugin":      {{Name: "DefaultBinder"}},
 					"QueueSortPlugin": {{Name: "PrioritySort"}},
 					"ReservePlugin":   {{Name: "VolumeBinding"}},
-					"UnreservePlugin": {{Name: "VolumeBinding"}},
 					"PreBindPlugin":   {{Name: "VolumeBinding"}},
-					"PostBindPlugin":  {{Name: "VolumeBinding"}},
 				},
 			},
 		},
@@ -285,31 +287,35 @@ profiles:
 					"PreFilterPlugin": {
 						{Name: "NodeResourcesFit"},
 						{Name: "NodePorts"},
-						{Name: "InterPodAffinity"},
 						{Name: "PodTopologySpread"},
+						{Name: "InterPodAffinity"},
+						{Name: "VolumeBinding"},
 					},
 					"FilterPlugin": {
 						{Name: "NodeUnschedulable"},
-						{Name: "NodeResourcesFit"},
 						{Name: "NodeName"},
-						{Name: "NodePorts"},
-						{Name: "NodeAffinity"},
-						{Name: "VolumeRestrictions"},
 						{Name: "TaintToleration"},
+						{Name: "NodeAffinity"},
+						{Name: "NodePorts"},
+						{Name: "NodeResourcesFit"},
+						{Name: "VolumeRestrictions"},
 						{Name: "EBSLimits"},
 						{Name: "GCEPDLimits"},
 						{Name: "NodeVolumeLimits"},
 						{Name: "AzureDiskLimits"},
 						{Name: "VolumeBinding"},
 						{Name: "VolumeZone"},
-						{Name: "InterPodAffinity"},
 						{Name: "PodTopologySpread"},
+						{Name: "InterPodAffinity"},
+					},
+					"PostFilterPlugin": {
+						{Name: "DefaultPreemption"},
 					},
 					"PreScorePlugin": {
 						{Name: "InterPodAffinity"},
-						{Name: "DefaultPodTopologySpread"},
-						{Name: "TaintToleration"},
 						{Name: "PodTopologySpread"},
+						{Name: "TaintToleration"},
+						{Name: "NodeAffinity"},
 					},
 					"ScorePlugin": {
 						{Name: "NodeResourcesBalancedAllocation", Weight: 1},
@@ -318,15 +324,12 @@ profiles:
 						{Name: "NodeResourcesMostAllocated", Weight: 1},
 						{Name: "NodeAffinity", Weight: 1},
 						{Name: "NodePreferAvoidPods", Weight: 10000},
-						{Name: "DefaultPodTopologySpread", Weight: 1},
+						{Name: "PodTopologySpread", Weight: 2},
 						{Name: "TaintToleration", Weight: 1},
-						{Name: "PodTopologySpread", Weight: 1},
 					},
-					"BindPlugin":      {{Name: "DefaultBinder"}},
-					"ReservePlugin":   {{Name: "VolumeBinding"}},
-					"UnreservePlugin": {{Name: "VolumeBinding"}},
-					"PreBindPlugin":   {{Name: "VolumeBinding"}},
-					"PostBindPlugin":  {{Name: "VolumeBinding"}},
+					"BindPlugin":    {{Name: "DefaultBinder"}},
+					"ReservePlugin": {{Name: "VolumeBinding"}},
+					"PreBindPlugin": {{Name: "VolumeBinding"}},
 				},
 			},
 		},
@@ -347,6 +350,7 @@ profiles:
 						{Name: "TaintToleration"},
 						{Name: "InterPodAffinity"},
 					},
+					"PostFilterPlugin": {{Name: "DefaultPreemption"}},
 					"PreScorePlugin": {
 						{Name: "InterPodAffinity"},
 					},
@@ -359,6 +363,15 @@ profiles:
 		},
 	}
 
+	makeListener := func(t *testing.T) net.Listener {
+		t.Helper()
+		l, err := net.Listen("tcp", ":0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return l
+	}
+
 	for _, tc := range testcases {
 		t.Run(tc.name, func(t *testing.T) {
 			fs := pflag.NewFlagSet("test", pflag.PanicOnError)
@@ -366,6 +379,15 @@ profiles:
 			if err != nil {
 				t.Fatal(err)
 			}
+
+			// use listeners instead of static ports so parallel test runs don't conflict
+			opts.SecureServing.Listener = makeListener(t)
+			defer opts.SecureServing.Listener.Close()
+			opts.CombinedInsecureServing.Metrics.Listener = makeListener(t)
+			defer opts.CombinedInsecureServing.Metrics.Listener.Close()
+			opts.CombinedInsecureServing.Healthz.Listener = makeListener(t)
+			defer opts.CombinedInsecureServing.Healthz.Listener.Close()
+
 			for _, f := range opts.Flags().FlagSets {
 				fs.AddFlagSet(f)
 			}
@@ -373,15 +395,12 @@ profiles:
 				t.Fatal(err)
 			}
 
-			var args []string
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			cc, sched, err := Setup(ctx, args, opts)
+			_, sched, err := Setup(ctx, opts)
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer cc.SecureServing.Listener.Close()
-			defer cc.InsecureServing.Listener.Close()
 
 			gotPlugins := make(map[string]map[string][]kubeschedulerconfig.Plugin)
 			for n, p := range sched.Profiles {

@@ -16,6 +16,7 @@
 package machine
 
 import (
+	"bytes"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -89,11 +90,6 @@ func GetSockets(procInfo []byte) int {
 
 // GetClockSpeed returns the CPU clock speed, given a []byte formatted as the /proc/cpuinfo file.
 func GetClockSpeed(procInfo []byte) (uint64, error) {
-	// s390/s390x, mips64, riscv64, aarch64 and arm32 changes
-	if isMips64() || isSystemZ() || isAArch64() || isArm32() || isRiscv64() {
-		return 0, nil
-	}
-
 	// First look through sys to find a max supported cpu frequency.
 	if utils.FileExists(maxFreqFile) {
 		val, err := ioutil.ReadFile(maxFreqFile)
@@ -107,6 +103,11 @@ func GetClockSpeed(procInfo []byte) (uint64, error) {
 		}
 		return maxFreq, nil
 	}
+	// s390/s390x, mips64, riscv64, aarch64 and arm32 changes
+	if isMips64() || isSystemZ() || isAArch64() || isArm32() || isRiscv64() {
+		return 0, nil
+	}
+
 	// Fall back to /proc/cpuinfo
 	matches := cpuClockSpeedMHz.FindSubmatch(procInfo)
 	if len(matches) != 2 {
@@ -246,6 +247,17 @@ func getUniqueCPUPropertyCount(cpuBusPath string, propertyName string) int {
 	}
 	uniques := make(map[string]bool)
 	for _, sysCPUPath := range sysCPUPaths {
+		onlinePath := filepath.Join(sysCPUPath, "online")
+		onlineVal, err := ioutil.ReadFile(onlinePath)
+		if err != nil {
+			klog.Warningf("Cannot determine CPU %s online state, skipping", sysCPUPath)
+			continue
+		}
+		onlineVal = bytes.TrimSpace(onlineVal)
+		if len(onlineVal) == 0 || onlineVal[0] != 49 {
+			klog.Warningf("CPU %s is offline, skipping", sysCPUPath)
+			continue
+		}
 		propertyPath := filepath.Join(sysCPUPath, sysFsCPUTopology, propertyName)
 		propertyVal, err := ioutil.ReadFile(propertyPath)
 		if err != nil {

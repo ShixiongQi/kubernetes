@@ -29,9 +29,9 @@ import (
 	"k8s.io/klog/v2"
 
 	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
-	kubeletapis "k8s.io/kubernetes/pkg/kubelet/apis"
 )
 
+// DefaultMemorySwap always returns 0 for no memory swap in a sandbox
 func DefaultMemorySwap() int64 {
 	return 0
 }
@@ -43,15 +43,10 @@ func (ds *dockerService) getSecurityOpts(seccompProfile string, separator rune) 
 	return nil, nil
 }
 
-// applyExperimentalCreateConfig applys experimental configures from sandbox annotations.
-func applyExperimentalCreateConfig(createConfig *dockertypes.ContainerCreateConfig, annotations map[string]string) {
-	if kubeletapis.ShouldIsolatedByHyperV(annotations) {
-		createConfig.HostConfig.Isolation = kubeletapis.HypervIsolationValue
-
-		if networkMode := os.Getenv("CONTAINER_NETWORK"); networkMode == "" {
-			createConfig.HostConfig.NetworkMode = dockercontainer.NetworkMode("none")
-		}
-	}
+func (ds *dockerService) getSandBoxSecurityOpts(separator rune) []string {
+	// Currently, Windows container does not support privileged mode, so no no-new-privileges flag can be returned directly like Linux
+	// If the future Windows container has new support for privileged mode, we can adjust it here
+	return nil
 }
 
 func (ds *dockerService) updateCreateConfig(
@@ -61,7 +56,7 @@ func (ds *dockerService) updateCreateConfig(
 	podSandboxID string, securityOptSep rune, apiVersion *semver.Version) error {
 	if networkMode := os.Getenv("CONTAINER_NETWORK"); networkMode != "" {
 		createConfig.HostConfig.NetworkMode = dockercontainer.NetworkMode(networkMode)
-	} else if !kubeletapis.ShouldIsolatedByHyperV(sandboxConfig.Annotations) {
+	} else {
 		// Todo: Refactor this call in future for calling methods directly in security_context.go
 		modifyHostOptionsForContainer(nil, podSandboxID, createConfig.HostConfig)
 	}
@@ -82,8 +77,6 @@ func (ds *dockerService) updateCreateConfig(
 		// Apply security context.
 		applyWindowsContainerSecurityContext(wc.GetSecurityContext(), createConfig.Config, createConfig.HostConfig)
 	}
-
-	applyExperimentalCreateConfig(createConfig, sandboxConfig.Annotations)
 
 	return nil
 }
@@ -142,21 +135,12 @@ func (ds *dockerService) determinePodIPBySandboxID(sandboxID string) []string {
 			// Instead of relying on this call, an explicit call to addToNetwork should be
 			// done immediately after ContainerCreation, in case of Windows only. TBD Issue # to handle this
 
-			if r.HostConfig.Isolation == kubeletapis.HypervIsolationValue {
-				// Hyper-V only supports one container per Pod yet and the container will have a different
-				// IP address from sandbox. Return the first non-sandbox container IP as POD IP.
-				// TODO(feiskyer): remove this workaround after Hyper-V supports multiple containers per Pod.
-				if containerIPs := ds.getIPs(c.ID, r); len(containerIPs) != 0 {
-					return containerIPs
-				}
-			} else {
-				// Do not return any IP, so that we would continue and get the IP of the Sandbox.
-				// Windows 1709 and 1803 doesn't have the Namespace support, so getIP() is called
-				// to replicate the DNS registry key to the Workload container (IP/Gateway/MAC is
-				// set separately than DNS).
-				// TODO(feiskyer): remove this workaround after Namespace is supported in Windows RS5.
-				ds.getIPs(sandboxID, r)
-			}
+			// Do not return any IP, so that we would continue and get the IP of the Sandbox.
+			// Windows 1709 and 1803 doesn't have the Namespace support, so getIP() is called
+			// to replicate the DNS registry key to the Workload container (IP/Gateway/MAC is
+			// set separately than DNS).
+			// TODO(feiskyer): remove this workaround after Namespace is supported in Windows RS5.
+			ds.getIPs(sandboxID, r)
 		} else {
 			// ds.getIP will call the CNI plugin to fetch the IP
 			if containerIPs := ds.getIPs(c.ID, r); len(containerIPs) != 0 {

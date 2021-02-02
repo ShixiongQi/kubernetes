@@ -95,7 +95,6 @@ var _ = SIGDescribe("Cluster size autoscaling [Slow]", func() {
 	f := framework.NewDefaultFramework("autoscaling")
 	var c clientset.Interface
 	var nodeCount int
-	var coreCount int64
 	var memAllocatableMb int
 	var originalSizes map[string]int
 
@@ -118,11 +117,6 @@ var _ = SIGDescribe("Cluster size autoscaling [Slow]", func() {
 		nodes, err := e2enode.GetReadySchedulableNodes(f.ClientSet)
 		framework.ExpectNoError(err)
 		nodeCount = len(nodes.Items)
-		coreCount = 0
-		for _, node := range nodes.Items {
-			quantity := node.Status.Allocatable[v1.ResourceCPU]
-			coreCount += quantity.Value()
-		}
 		ginkgo.By(fmt.Sprintf("Initial number of schedulable nodes: %v", nodeCount))
 		framework.ExpectNotEqual(nodeCount, 0)
 		mem := nodes.Items[0].Status.Allocatable[v1.ResourceMemory]
@@ -184,7 +178,7 @@ var _ = SIGDescribe("Cluster size autoscaling [Slow]", func() {
 			framework.ExpectNoError(err)
 
 			for _, e := range events.Items {
-				if e.InvolvedObject.Kind == "Pod" && e.Reason == "NotTriggerScaleUp" && strings.Contains(e.Message, "it wouldn't fit if a new node is added") {
+				if e.InvolvedObject.Kind == "Pod" && e.Reason == "NotTriggerScaleUp" {
 					ginkgo.By("NotTriggerScaleUp event found")
 					eventFound = true
 					break EventsLoop
@@ -500,7 +494,7 @@ var _ = SIGDescribe("Cluster size autoscaling [Slow]", func() {
 
 		pv, pvc, err := e2epv.CreatePVPVC(c, pvConfig, pvcConfig, f.Namespace.Name, false)
 		framework.ExpectNoError(err)
-		framework.ExpectNoError(e2epv.WaitOnPVandPVC(c, f.Namespace.Name, pv, pvc))
+		framework.ExpectNoError(e2epv.WaitOnPVandPVC(c, f.Timeouts, f.Namespace.Name, pv, pvc))
 
 		defer func() {
 			errs := e2epv.PVPVCCleanup(c, f.Namespace.Name, pv, pvc)

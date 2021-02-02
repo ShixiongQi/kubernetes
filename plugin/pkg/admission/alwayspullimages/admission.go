@@ -30,8 +30,10 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/apiserver/pkg/admission"
+	"k8s.io/klog/v2"
 	api "k8s.io/kubernetes/pkg/apis/core"
 	"k8s.io/kubernetes/pkg/apis/core/pods"
 )
@@ -66,7 +68,7 @@ func (a *AlwaysPullImages) Admit(ctx context.Context, attributes admission.Attri
 		return apierrors.NewBadRequest("Resource was marked with kind Pod but was unable to be converted")
 	}
 
-	pods.VisitContainersWithPath(&pod.Spec, func(c *api.Container, _ *field.Path) bool {
+	pods.VisitContainersWithPath(&pod.Spec, field.NewPath("spec"), func(c *api.Container, _ *field.Path) bool {
 		c.ImagePullPolicy = api.PullAlways
 		return true
 	})
@@ -86,7 +88,7 @@ func (*AlwaysPullImages) Validate(ctx context.Context, attributes admission.Attr
 	}
 
 	var allErrs []error
-	pods.VisitContainersWithPath(&pod.Spec, func(c *api.Container, p *field.Path) bool {
+	pods.VisitContainersWithPath(&pod.Spec, field.NewPath("spec"), func(c *api.Container, p *field.Path) bool {
 		if c.ImagePullPolicy != api.PullAlways {
 			allErrs = append(allErrs, admission.NewForbidden(attributes,
 				field.NotSupported(p.Child("imagePullPolicy"), c.ImagePullPolicy, []string{string(api.PullAlways)}),
@@ -101,12 +103,49 @@ func (*AlwaysPullImages) Validate(ctx context.Context, attributes admission.Attr
 	return nil
 }
 
+// check if it's update and it doesn't change the images referenced by the pod spec
+func isUpdateWithNoNewImages(attributes admission.Attributes) bool {
+	if attributes.GetOperation() != admission.Update {
+		return false
+	}
+
+	pod, ok := attributes.GetObject().(*api.Pod)
+	if !ok {
+		klog.Warningf("Resource was marked with kind Pod but pod was unable to be converted.")
+		return false
+	}
+
+	oldPod, ok := attributes.GetOldObject().(*api.Pod)
+	if !ok {
+		klog.Warningf("Resource was marked with kind Pod but old pod was unable to be converted.")
+		return false
+	}
+
+	oldImages := sets.NewString()
+	pods.VisitContainersWithPath(&oldPod.Spec, field.NewPath("spec"), func(c *api.Container, _ *field.Path) bool {
+		oldImages.Insert(c.Image)
+		return true
+	})
+
+	hasNewImage := false
+	pods.VisitContainersWithPath(&pod.Spec, field.NewPath("spec"), func(c *api.Container, _ *field.Path) bool {
+		if !oldImages.Has(c.Image) {
+			hasNewImage = true
+		}
+		return !hasNewImage
+	})
+	return !hasNewImage
+}
+
 func shouldIgnore(attributes admission.Attributes) bool {
 	// Ignore all calls to subresources or resources other than pods.
 	if len(attributes.GetSubresource()) != 0 || attributes.GetResource().GroupResource() != api.Resource("pods") {
 		return true
 	}
 
+	if isUpdateWithNoNewImages(attributes) {
+		return true
+	}
 	return false
 }
 

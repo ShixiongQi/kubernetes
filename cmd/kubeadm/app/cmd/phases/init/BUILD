@@ -27,7 +27,6 @@ go_library(
         "//cmd/kubeadm/app/cmd/options:go_default_library",
         "//cmd/kubeadm/app/cmd/phases/workflow:go_default_library",
         "//cmd/kubeadm/app/cmd/util:go_default_library",
-        "//cmd/kubeadm/app/componentconfigs:go_default_library",
         "//cmd/kubeadm/app/constants:go_default_library",
         "//cmd/kubeadm/app/phases/addons/dns:go_default_library",
         "//cmd/kubeadm/app/phases/addons/proxy:go_default_library",
@@ -45,6 +44,7 @@ go_library(
         "//cmd/kubeadm/app/preflight:go_default_library",
         "//cmd/kubeadm/app/util/apiclient:go_default_library",
         "//cmd/kubeadm/app/util/dryrun:go_default_library",
+        "//cmd/kubeadm/app/util/etcd:go_default_library",
         "//cmd/kubeadm/app/util/pkiutil:go_default_library",
         "//staging/src/k8s.io/apimachinery/pkg/apis/meta/v1:go_default_library",
         "//staging/src/k8s.io/apimachinery/pkg/util/sets:go_default_library",
@@ -63,6 +63,7 @@ go_test(
     srcs = [
         "certs_test.go",
         "data_test.go",
+        "main_test.go",
     ],
     embed = [":go_default_library"],
     deps = [
@@ -71,6 +72,7 @@ go_test(
         "//cmd/kubeadm/app/phases/certs:go_default_library",
         "//cmd/kubeadm/app/util/certs:go_default_library",
         "//cmd/kubeadm/app/util/pkiutil:go_default_library",
+        "//cmd/kubeadm/app/util/pkiutil/testing:go_default_library",
         "//cmd/kubeadm/test:go_default_library",
         "//staging/src/k8s.io/apimachinery/pkg/util/sets:go_default_library",
         "//staging/src/k8s.io/client-go/kubernetes:go_default_library",

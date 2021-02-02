@@ -20,13 +20,13 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-
-	utilfeature "k8s.io/apiserver/pkg/util/feature"
+	"k8s.io/apiserver/pkg/util/feature"
+	"k8s.io/component-base/featuregate"
 	featuregatetesting "k8s.io/component-base/featuregate/testing"
 	"k8s.io/kubernetes/pkg/features"
 	schedulerapi "k8s.io/kubernetes/pkg/scheduler/apis/config"
 	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/defaultbinder"
-	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/defaultpodtopologyspread"
+	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/defaultpreemption"
 	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/imagelocality"
 	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/interpodaffinity"
 	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/nodeaffinity"
@@ -38,6 +38,7 @@ import (
 	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/nodevolumelimits"
 	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/podtopologyspread"
 	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/queuesort"
+	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/selectorspread"
 	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/tainttoleration"
 	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/volumebinding"
 	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/volumerestrictions"
@@ -55,35 +56,41 @@ func TestClusterAutoscalerProvider(t *testing.T) {
 			Enabled: []schedulerapi.Plugin{
 				{Name: noderesources.FitName},
 				{Name: nodeports.Name},
-				{Name: interpodaffinity.Name},
 				{Name: podtopologyspread.Name},
+				{Name: interpodaffinity.Name},
+				{Name: volumebinding.Name},
 			},
 		},
 		Filter: &schedulerapi.PluginSet{
 			Enabled: []schedulerapi.Plugin{
 				{Name: nodeunschedulable.Name},
-				{Name: noderesources.FitName},
 				{Name: nodename.Name},
-				{Name: nodeports.Name},
-				{Name: nodeaffinity.Name},
-				{Name: volumerestrictions.Name},
 				{Name: tainttoleration.Name},
+				{Name: nodeaffinity.Name},
+				{Name: nodeports.Name},
+				{Name: noderesources.FitName},
+				{Name: volumerestrictions.Name},
 				{Name: nodevolumelimits.EBSName},
 				{Name: nodevolumelimits.GCEPDName},
 				{Name: nodevolumelimits.CSIName},
 				{Name: nodevolumelimits.AzureDiskName},
 				{Name: volumebinding.Name},
 				{Name: volumezone.Name},
-				{Name: interpodaffinity.Name},
 				{Name: podtopologyspread.Name},
+				{Name: interpodaffinity.Name},
+			},
+		},
+		PostFilter: &schedulerapi.PluginSet{
+			Enabled: []schedulerapi.Plugin{
+				{Name: defaultpreemption.Name},
 			},
 		},
 		PreScore: &schedulerapi.PluginSet{
 			Enabled: []schedulerapi.Plugin{
 				{Name: interpodaffinity.Name},
-				{Name: defaultpodtopologyspread.Name},
-				{Name: tainttoleration.Name},
 				{Name: podtopologyspread.Name},
+				{Name: tainttoleration.Name},
+				{Name: nodeaffinity.Name},
 			},
 		},
 		Score: &schedulerapi.PluginSet{
@@ -94,17 +101,11 @@ func TestClusterAutoscalerProvider(t *testing.T) {
 				{Name: noderesources.MostAllocatedName, Weight: 1},
 				{Name: nodeaffinity.Name, Weight: 1},
 				{Name: nodepreferavoidpods.Name, Weight: 10000},
-				{Name: defaultpodtopologyspread.Name, Weight: 1},
+				{Name: podtopologyspread.Name, Weight: 2},
 				{Name: tainttoleration.Name, Weight: 1},
-				{Name: podtopologyspread.Name, Weight: 1},
 			},
 		},
 		Reserve: &schedulerapi.PluginSet{
-			Enabled: []schedulerapi.Plugin{
-				{Name: volumebinding.Name},
-			},
-		},
-		Unreserve: &schedulerapi.PluginSet{
 			Enabled: []schedulerapi.Plugin{
 				{Name: volumebinding.Name},
 			},
@@ -119,11 +120,6 @@ func TestClusterAutoscalerProvider(t *testing.T) {
 				{Name: defaultbinder.Name},
 			},
 		},
-		PostBind: &schedulerapi.PluginSet{
-			Enabled: []schedulerapi.Plugin{
-				{Name: volumebinding.Name},
-			},
-		},
 	}
 
 	r := NewRegistry()
@@ -135,13 +131,12 @@ func TestClusterAutoscalerProvider(t *testing.T) {
 
 func TestApplyFeatureGates(t *testing.T) {
 	tests := []struct {
-		name            string
-		featuresEnabled bool
-		wantConfig      *schedulerapi.Plugins
+		name       string
+		features   map[featuregate.Feature]bool
+		wantConfig *schedulerapi.Plugins
 	}{
 		{
-			name:            "Feature gates disabled",
-			featuresEnabled: false,
+			name: "Feature gates disabled",
 			wantConfig: &schedulerapi.Plugins{
 				QueueSort: &schedulerapi.PluginSet{
 					Enabled: []schedulerapi.Plugin{
@@ -152,32 +147,41 @@ func TestApplyFeatureGates(t *testing.T) {
 					Enabled: []schedulerapi.Plugin{
 						{Name: noderesources.FitName},
 						{Name: nodeports.Name},
+						{Name: podtopologyspread.Name},
 						{Name: interpodaffinity.Name},
+						{Name: volumebinding.Name},
 					},
 				},
 				Filter: &schedulerapi.PluginSet{
 					Enabled: []schedulerapi.Plugin{
 						{Name: nodeunschedulable.Name},
-						{Name: noderesources.FitName},
 						{Name: nodename.Name},
-						{Name: nodeports.Name},
-						{Name: nodeaffinity.Name},
-						{Name: volumerestrictions.Name},
 						{Name: tainttoleration.Name},
+						{Name: nodeaffinity.Name},
+						{Name: nodeports.Name},
+						{Name: noderesources.FitName},
+						{Name: volumerestrictions.Name},
 						{Name: nodevolumelimits.EBSName},
 						{Name: nodevolumelimits.GCEPDName},
 						{Name: nodevolumelimits.CSIName},
 						{Name: nodevolumelimits.AzureDiskName},
 						{Name: volumebinding.Name},
 						{Name: volumezone.Name},
+						{Name: podtopologyspread.Name},
 						{Name: interpodaffinity.Name},
+					},
+				},
+				PostFilter: &schedulerapi.PluginSet{
+					Enabled: []schedulerapi.Plugin{
+						{Name: defaultpreemption.Name},
 					},
 				},
 				PreScore: &schedulerapi.PluginSet{
 					Enabled: []schedulerapi.Plugin{
 						{Name: interpodaffinity.Name},
-						{Name: defaultpodtopologyspread.Name},
+						{Name: podtopologyspread.Name},
 						{Name: tainttoleration.Name},
+						{Name: nodeaffinity.Name},
 					},
 				},
 				Score: &schedulerapi.PluginSet{
@@ -188,16 +192,11 @@ func TestApplyFeatureGates(t *testing.T) {
 						{Name: noderesources.LeastAllocatedName, Weight: 1},
 						{Name: nodeaffinity.Name, Weight: 1},
 						{Name: nodepreferavoidpods.Name, Weight: 10000},
-						{Name: defaultpodtopologyspread.Name, Weight: 1},
+						{Name: podtopologyspread.Name, Weight: 2},
 						{Name: tainttoleration.Name, Weight: 1},
 					},
 				},
 				Reserve: &schedulerapi.PluginSet{
-					Enabled: []schedulerapi.Plugin{
-						{Name: volumebinding.Name},
-					},
-				},
-				Unreserve: &schedulerapi.PluginSet{
 					Enabled: []schedulerapi.Plugin{
 						{Name: volumebinding.Name},
 					},
@@ -210,18 +209,15 @@ func TestApplyFeatureGates(t *testing.T) {
 				Bind: &schedulerapi.PluginSet{
 					Enabled: []schedulerapi.Plugin{
 						{Name: defaultbinder.Name},
-					},
-				},
-				PostBind: &schedulerapi.PluginSet{
-					Enabled: []schedulerapi.Plugin{
-						{Name: volumebinding.Name},
 					},
 				},
 			},
 		},
 		{
-			name:            "Feature gates enabled",
-			featuresEnabled: true,
+			name: "DefaultPodTopologySpread disabled",
+			features: map[featuregate.Feature]bool{
+				features.DefaultPodTopologySpread: false,
+			},
 			wantConfig: &schedulerapi.Plugins{
 				QueueSort: &schedulerapi.PluginSet{
 					Enabled: []schedulerapi.Plugin{
@@ -232,36 +228,42 @@ func TestApplyFeatureGates(t *testing.T) {
 					Enabled: []schedulerapi.Plugin{
 						{Name: noderesources.FitName},
 						{Name: nodeports.Name},
-						{Name: interpodaffinity.Name},
 						{Name: podtopologyspread.Name},
+						{Name: interpodaffinity.Name},
+						{Name: volumebinding.Name},
 					},
 				},
 				Filter: &schedulerapi.PluginSet{
 					Enabled: []schedulerapi.Plugin{
 						{Name: nodeunschedulable.Name},
-						{Name: noderesources.FitName},
 						{Name: nodename.Name},
-						{Name: nodeports.Name},
-						{Name: nodeaffinity.Name},
-						{Name: volumerestrictions.Name},
 						{Name: tainttoleration.Name},
+						{Name: nodeaffinity.Name},
+						{Name: nodeports.Name},
+						{Name: noderesources.FitName},
+						{Name: volumerestrictions.Name},
 						{Name: nodevolumelimits.EBSName},
 						{Name: nodevolumelimits.GCEPDName},
 						{Name: nodevolumelimits.CSIName},
 						{Name: nodevolumelimits.AzureDiskName},
 						{Name: volumebinding.Name},
 						{Name: volumezone.Name},
-						{Name: interpodaffinity.Name},
 						{Name: podtopologyspread.Name},
+						{Name: interpodaffinity.Name},
+					},
+				},
+				PostFilter: &schedulerapi.PluginSet{
+					Enabled: []schedulerapi.Plugin{
+						{Name: defaultpreemption.Name},
 					},
 				},
 				PreScore: &schedulerapi.PluginSet{
 					Enabled: []schedulerapi.Plugin{
 						{Name: interpodaffinity.Name},
-						{Name: defaultpodtopologyspread.Name},
-						{Name: tainttoleration.Name},
 						{Name: podtopologyspread.Name},
-						{Name: noderesources.ResourceLimitsName},
+						{Name: tainttoleration.Name},
+						{Name: nodeaffinity.Name},
+						{Name: selectorspread.Name},
 					},
 				},
 				Score: &schedulerapi.PluginSet{
@@ -272,18 +274,12 @@ func TestApplyFeatureGates(t *testing.T) {
 						{Name: noderesources.LeastAllocatedName, Weight: 1},
 						{Name: nodeaffinity.Name, Weight: 1},
 						{Name: nodepreferavoidpods.Name, Weight: 10000},
-						{Name: defaultpodtopologyspread.Name, Weight: 1},
+						{Name: podtopologyspread.Name, Weight: 2},
 						{Name: tainttoleration.Name, Weight: 1},
-						{Name: podtopologyspread.Name, Weight: 1},
-						{Name: noderesources.ResourceLimitsName, Weight: 1},
+						{Name: selectorspread.Name, Weight: 1},
 					},
 				},
 				Reserve: &schedulerapi.PluginSet{
-					Enabled: []schedulerapi.Plugin{
-						{Name: volumebinding.Name},
-					},
-				},
-				Unreserve: &schedulerapi.PluginSet{
 					Enabled: []schedulerapi.Plugin{
 						{Name: volumebinding.Name},
 					},
@@ -296,11 +292,6 @@ func TestApplyFeatureGates(t *testing.T) {
 				Bind: &schedulerapi.PluginSet{
 					Enabled: []schedulerapi.Plugin{
 						{Name: defaultbinder.Name},
-					},
-				},
-				PostBind: &schedulerapi.PluginSet{
-					Enabled: []schedulerapi.Plugin{
-						{Name: volumebinding.Name},
 					},
 				},
 			},
@@ -309,8 +300,9 @@ func TestApplyFeatureGates(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.ResourceLimitsPriorityFunction, test.featuresEnabled)()
-			defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.EvenPodsSpread, test.featuresEnabled)()
+			for k, v := range test.features {
+				defer featuregatetesting.SetFeatureGateDuringTest(t, feature.DefaultFeatureGate, k, v)()
+			}
 
 			r := NewRegistry()
 			gotConfig := r[schedulerapi.SchedulerDefaultProviderName]

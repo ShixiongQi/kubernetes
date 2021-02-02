@@ -23,12 +23,13 @@ import (
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/kubernetes/pkg/scheduler/apis/config"
-	framework "k8s.io/kubernetes/pkg/scheduler/framework/v1alpha1"
+	"k8s.io/kubernetes/pkg/scheduler/apis/config/validation"
+	"k8s.io/kubernetes/pkg/scheduler/framework"
 )
 
 // LeastAllocated is a score plugin that favors nodes with fewer allocation requested resources based on requested resources.
 type LeastAllocated struct {
-	handle framework.FrameworkHandle
+	handle framework.Handle
 	resourceAllocationScorer
 }
 
@@ -46,7 +47,7 @@ func (la *LeastAllocated) Name() string {
 func (la *LeastAllocated) Score(ctx context.Context, state *framework.CycleState, pod *v1.Pod, nodeName string) (int64, *framework.Status) {
 	nodeInfo, err := la.handle.SnapshotSharedLister().NodeInfos().Get(nodeName)
 	if err != nil {
-		return 0, framework.NewStatus(framework.Error, fmt.Sprintf("getting node %q from Snapshot: %v", nodeName, err))
+		return 0, framework.AsStatus(fmt.Errorf("getting node %q from Snapshot: %w", nodeName, err))
 	}
 
 	// la.score favors nodes with fewer requested resources.
@@ -64,20 +65,18 @@ func (la *LeastAllocated) ScoreExtensions() framework.ScoreExtensions {
 }
 
 // NewLeastAllocated initializes a new plugin and returns it.
-func NewLeastAllocated(laArgs runtime.Object, h framework.FrameworkHandle) (framework.Plugin, error) {
+func NewLeastAllocated(laArgs runtime.Object, h framework.Handle) (framework.Plugin, error) {
 	args, ok := laArgs.(*config.NodeResourcesLeastAllocatedArgs)
 	if !ok {
 		return nil, fmt.Errorf("want args to be of type NodeResourcesLeastAllocatedArgs, got %T", laArgs)
 	}
 
+	if err := validation.ValidateNodeResourcesLeastAllocatedArgs(args); err != nil {
+		return nil, err
+	}
+
 	resToWeightMap := make(resourceToWeightMap)
 	for _, resource := range (*args).Resources {
-		if resource.Weight <= 0 {
-			return nil, fmt.Errorf("resource Weight of %v should be a positive value, got %v", resource.Name, resource.Weight)
-		}
-		if resource.Weight > framework.MaxNodeScore {
-			return nil, fmt.Errorf("resource Weight of %v should be less than 100, got %v", resource.Name, resource.Weight)
-		}
 		resToWeightMap[v1.ResourceName(resource.Name)] = resource.Weight
 	}
 

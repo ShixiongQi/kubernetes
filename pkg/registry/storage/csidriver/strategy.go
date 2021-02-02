@@ -43,11 +43,21 @@ func (csiDriverStrategy) NamespaceScoped() bool {
 	return false
 }
 
-// PrepareForCreate clears the VolumeLifecycleModes field if the corresponding feature is disabled.
+// PrepareForCreate clears the fields for which the corresponding feature is disabled.
 func (csiDriverStrategy) PrepareForCreate(ctx context.Context, obj runtime.Object) {
+	csiDriver := obj.(*storage.CSIDriver)
+	if !utilfeature.DefaultFeatureGate.Enabled(features.CSIStorageCapacity) {
+		csiDriver.Spec.StorageCapacity = nil
+	}
 	if !utilfeature.DefaultFeatureGate.Enabled(features.CSIInlineVolume) {
-		csiDriver := obj.(*storage.CSIDriver)
 		csiDriver.Spec.VolumeLifecycleModes = nil
+	}
+	if !utilfeature.DefaultFeatureGate.Enabled(features.CSIVolumeFSGroupPolicy) {
+		csiDriver.Spec.FSGroupPolicy = nil
+	}
+	if !utilfeature.DefaultFeatureGate.Enabled(features.CSIServiceAccountToken) {
+		csiDriver.Spec.TokenRequests = nil
+		csiDriver.Spec.RequiresRepublish = nil
 	}
 }
 
@@ -68,22 +78,42 @@ func (csiDriverStrategy) AllowCreateOnUpdate() bool {
 	return false
 }
 
-// PrepareForUpdate clears the VolumeLifecycleModes field if the corresponding feature is disabled and
+// PrepareForUpdate clears the fields for which the corresponding feature is disabled and
 // existing object does not already have that field set. This allows the field to remain when
 // downgrading to a version that has the feature disabled.
 func (csiDriverStrategy) PrepareForUpdate(ctx context.Context, obj, old runtime.Object) {
+	if old.(*storage.CSIDriver).Spec.StorageCapacity == nil &&
+		!utilfeature.DefaultFeatureGate.Enabled(features.CSIStorageCapacity) {
+		newCSIDriver := obj.(*storage.CSIDriver)
+		newCSIDriver.Spec.StorageCapacity = nil
+	}
 	if old.(*storage.CSIDriver).Spec.VolumeLifecycleModes == nil &&
 		!utilfeature.DefaultFeatureGate.Enabled(features.CSIInlineVolume) {
 		newCSIDriver := obj.(*storage.CSIDriver)
 		newCSIDriver.Spec.VolumeLifecycleModes = nil
+	}
+	if old.(*storage.CSIDriver).Spec.FSGroupPolicy == nil &&
+		!utilfeature.DefaultFeatureGate.Enabled(features.CSIVolumeFSGroupPolicy) {
+		newCSIDriver := obj.(*storage.CSIDriver)
+		newCSIDriver.Spec.FSGroupPolicy = nil
+	}
+	if old.(*storage.CSIDriver).Spec.TokenRequests == nil &&
+		!utilfeature.DefaultFeatureGate.Enabled(features.CSIServiceAccountToken) {
+		csiDriver := obj.(*storage.CSIDriver)
+		csiDriver.Spec.TokenRequests = nil
+	}
+
+	if old.(*storage.CSIDriver).Spec.RequiresRepublish == nil &&
+		!utilfeature.DefaultFeatureGate.Enabled(features.CSIServiceAccountToken) {
+		csiDriver := obj.(*storage.CSIDriver)
+		csiDriver.Spec.RequiresRepublish = nil
 	}
 }
 
 func (csiDriverStrategy) ValidateUpdate(ctx context.Context, obj, old runtime.Object) field.ErrorList {
 	newCSIDriverObj := obj.(*storage.CSIDriver)
 	oldCSIDriverObj := old.(*storage.CSIDriver)
-	errorList := validation.ValidateCSIDriver(newCSIDriverObj)
-	return append(errorList, validation.ValidateCSIDriverUpdate(newCSIDriverObj, oldCSIDriverObj)...)
+	return validation.ValidateCSIDriverUpdate(newCSIDriverObj, oldCSIDriverObj)
 }
 
 func (csiDriverStrategy) AllowUnconditionalUpdate() bool {

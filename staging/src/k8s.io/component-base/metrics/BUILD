@@ -45,6 +45,7 @@ go_test(
         "desc_test.go",
         "gauge_test.go",
         "histogram_test.go",
+        "http_test.go",
         "opts_test.go",
         "registry_test.go",
         "summary_test.go",
@@ -82,19 +83,4 @@ filegroup(
     ],
     tags = ["automanaged"],
     visibility = ["//visibility:public"],
-)
-
-# Packages allowed to import github.com/prometheus
-package_group(
-    name = "prometheus_import_allow_list",
-    packages = [
-        "//cluster/images/etcd-version-monitor",
-        "//pkg/scheduler/framework/v1alpha1",
-        "//pkg/volume/util/operationexecutor",
-        "//staging/src/k8s.io/apiserver/pkg/util/flowcontrol/metrics",
-        "//staging/src/k8s.io/component-base/metrics/...",
-        "//test/e2e_node",
-        "//test/integration/apiserver/flowcontrol",
-        "//vendor/...",
-    ],
 )

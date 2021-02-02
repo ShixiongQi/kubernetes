@@ -152,6 +152,7 @@ func NewCmdCreate(f cmdutil.Factory, ioStreams genericclioptions.IOStreams) *cob
 	cmd.AddCommand(NewCmdCreatePriorityClass(f, ioStreams))
 	cmd.AddCommand(NewCmdCreateJob(f, ioStreams))
 	cmd.AddCommand(NewCmdCreateCronJob(f, ioStreams))
+	cmd.AddCommand(NewCmdCreateIngress(f, ioStreams))
 	return cmd
 }
 
@@ -427,6 +428,9 @@ func (o *CreateSubcommandOptions) Run() error {
 	if err != nil {
 		return err
 	}
+	if err := util.CreateOrUpdateAnnotation(o.CreateAnnotation, obj, scheme.DefaultJSONEncoder()); err != nil {
+		return err
+	}
 	if o.DryRunStrategy != cmdutil.DryRunClient {
 		// create subcommands have compiled knowledge of things they create, so type them directly
 		gvks, _, err := scheme.Scheme.ObjectKinds(obj)
@@ -439,12 +443,7 @@ func (o *CreateSubcommandOptions) Run() error {
 			return err
 		}
 
-		if err := util.CreateOrUpdateAnnotation(o.CreateAnnotation, obj, scheme.DefaultJSONEncoder()); err != nil {
-			return err
-		}
-
 		asUnstructured := &unstructured.Unstructured{}
-
 		if err := scheme.Scheme.Convert(obj, asUnstructured, nil); err != nil {
 			return err
 		}

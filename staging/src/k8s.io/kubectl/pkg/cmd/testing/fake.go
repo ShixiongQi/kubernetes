@@ -18,7 +18,6 @@ package testing
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -271,8 +270,6 @@ func convertExternalNamespacedType2ToInternalNamespacedType(in *ExternalNamespac
 	return nil
 }
 
-var errInvalidVersion = errors.New("not a version")
-
 // ValidVersion of API
 var ValidVersion = "v1"
 
@@ -407,7 +404,7 @@ type TestFactory struct {
 func NewTestFactory() *TestFactory {
 	// specify an optionalClientConfig to explicitly use in testing
 	// to avoid polluting an existing user config.
-	tmpFile, err := ioutil.TempFile("", "cmdtests_temp")
+	tmpFile, err := ioutil.TempFile(os.TempDir(), "cmdtests_temp")
 	if err != nil {
 		panic(fmt.Sprintf("unable to create a fake client config: %v", err))
 	}
@@ -465,6 +462,25 @@ func (f *TestFactory) ClientForMapping(mapping *meta.RESTMapping) (resource.REST
 	return f.Client, nil
 }
 
+// PathOptions returns a new PathOptions with a temp file
+func (f *TestFactory) PathOptions() *clientcmd.PathOptions {
+	pathOptions := clientcmd.NewDefaultPathOptions()
+	pathOptions.GlobalFile = f.tempConfigFile.Name()
+	pathOptions.EnvVar = ""
+	return pathOptions
+}
+
+// PathOptionsWithConfig writes a config to a temp file and returns PathOptions
+func (f *TestFactory) PathOptionsWithConfig(config clientcmdapi.Config) (*clientcmd.PathOptions, error) {
+	pathOptions := f.PathOptions()
+	err := clientcmd.WriteToFile(config, pathOptions.GlobalFile)
+	if err != nil {
+		return nil, err
+	}
+
+	return pathOptions, nil
+}
+
 // UnstructuredClientForMapping is used to get UnstructuredClient from a TestFactory
 func (f *TestFactory) UnstructuredClientForMapping(mapping *meta.RESTMapping) (resource.RESTClient, error) {
 	if f.UnstructuredClientForMappingFunc != nil {
@@ -519,6 +535,7 @@ func (f *TestFactory) KubernetesClientSet() (*kubernetes.Clientset, error) {
 	clientset.AutoscalingV2beta1().RESTClient().(*restclient.RESTClient).Client = fakeClient.Client
 	clientset.BatchV1().RESTClient().(*restclient.RESTClient).Client = fakeClient.Client
 	clientset.BatchV2alpha1().RESTClient().(*restclient.RESTClient).Client = fakeClient.Client
+	clientset.CertificatesV1().RESTClient().(*restclient.RESTClient).Client = fakeClient.Client
 	clientset.CertificatesV1beta1().RESTClient().(*restclient.RESTClient).Client = fakeClient.Client
 	clientset.ExtensionsV1beta1().RESTClient().(*restclient.RESTClient).Client = fakeClient.Client
 	clientset.RbacV1alpha1().RESTClient().(*restclient.RESTClient).Client = fakeClient.Client

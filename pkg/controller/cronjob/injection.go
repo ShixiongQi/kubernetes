@@ -19,6 +19,8 @@ package cronjob
 import (
 	"context"
 	"fmt"
+	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sync"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -31,33 +33,50 @@ import (
 	"k8s.io/client-go/tools/record"
 )
 
-// sjControlInterface is an interface that knows how to update CronJob status
+// cjControlInterface is an interface that knows how to update CronJob status
 // created as an interface to allow testing.
-type sjControlInterface interface {
-	UpdateStatus(sj *batchv1beta1.CronJob) (*batchv1beta1.CronJob, error)
+type cjControlInterface interface {
+	UpdateStatus(cj *batchv1beta1.CronJob) (*batchv1beta1.CronJob, error)
+	// GetCronJob retrieves a CronJob.
+	GetCronJob(namespace, name string) (*batchv1beta1.CronJob, error)
 }
 
-// realSJControl is the default implementation of sjControlInterface.
-type realSJControl struct {
+// realCJControl is the default implementation of cjControlInterface.
+type realCJControl struct {
 	KubeClient clientset.Interface
 }
 
-var _ sjControlInterface = &realSJControl{}
-
-func (c *realSJControl) UpdateStatus(sj *batchv1beta1.CronJob) (*batchv1beta1.CronJob, error) {
-	return c.KubeClient.BatchV1beta1().CronJobs(sj.Namespace).UpdateStatus(context.TODO(), sj, metav1.UpdateOptions{})
+func (c *realCJControl) GetCronJob(namespace, name string) (*batchv1beta1.CronJob, error) {
+	return c.KubeClient.BatchV1beta1().CronJobs(namespace).Get(context.TODO(), name, metav1.GetOptions{})
 }
 
-// fakeSJControl is the default implementation of sjControlInterface.
-type fakeSJControl struct {
+var _ cjControlInterface = &realCJControl{}
+
+func (c *realCJControl) UpdateStatus(cj *batchv1beta1.CronJob) (*batchv1beta1.CronJob, error) {
+	return c.KubeClient.BatchV1beta1().CronJobs(cj.Namespace).UpdateStatus(context.TODO(), cj, metav1.UpdateOptions{})
+}
+
+// fakeCJControl is the default implementation of cjControlInterface.
+type fakeCJControl struct {
+	CronJob *batchv1beta1.CronJob
 	Updates []batchv1beta1.CronJob
 }
 
-var _ sjControlInterface = &fakeSJControl{}
+func (c *fakeCJControl) GetCronJob(namespace, name string) (*batchv1beta1.CronJob, error) {
+	if name == c.CronJob.Name && namespace == c.CronJob.Namespace {
+		return c.CronJob, nil
+	}
+	return nil, errors.NewNotFound(schema.GroupResource{
+		Group:    "v1beta1",
+		Resource: "cronjobs",
+	}, name)
+}
 
-func (c *fakeSJControl) UpdateStatus(sj *batchv1beta1.CronJob) (*batchv1beta1.CronJob, error) {
-	c.Updates = append(c.Updates, *sj)
-	return sj, nil
+var _ cjControlInterface = &fakeCJControl{}
+
+func (c *fakeCJControl) UpdateStatus(cj *batchv1beta1.CronJob) (*batchv1beta1.CronJob, error) {
+	c.Updates = append(c.Updates, *cj)
+	return cj, nil
 }
 
 // ------------------------------------------------------------------ //

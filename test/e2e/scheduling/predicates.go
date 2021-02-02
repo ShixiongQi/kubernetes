@@ -22,9 +22,10 @@ import (
 	"time"
 
 	v1 "k8s.io/api/core/v1"
-	nodev1beta1 "k8s.io/api/node/v1beta1"
+	nodev1 "k8s.io/api/node/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	utilversion "k8s.io/apimachinery/pkg/util/version"
@@ -37,7 +38,6 @@ import (
 	e2eskipper "k8s.io/kubernetes/test/e2e/framework/skipper"
 	testutils "k8s.io/kubernetes/test/utils"
 	imageutils "k8s.io/kubernetes/test/utils/image"
-	k8utilnet "k8s.io/utils/net"
 
 	"github.com/onsi/ginkgo"
 
@@ -52,8 +52,8 @@ const (
 
 var localStorageVersion = utilversion.MustParseSemantic("v1.8.0-beta.0")
 
-// variable set in BeforeEach, never modified afterwards
-var masterNodes sets.String
+// variable populated in BeforeEach, never modified afterwards
+var workerNodes = sets.String{}
 
 type pausePodConfig struct {
 	Name                              string
@@ -95,17 +95,14 @@ var _ = SIGDescribe("SchedulerPredicates [Serial]", func() {
 
 		framework.AllNodesReady(cs, time.Minute)
 
-		// NOTE: Here doesn't get nodeList for supporting a master nodes which can host workload pods.
-		masterNodes, _, err = e2enode.GetMasterAndWorkerNodes(cs)
-		if err != nil {
-			framework.Logf("Unexpected error occurred: %v", err)
-		}
 		nodeList, err = e2enode.GetReadySchedulableNodes(cs)
 		if err != nil {
 			framework.Logf("Unexpected error occurred: %v", err)
 		}
-
 		framework.ExpectNoErrorWithOffset(0, err)
+		for _, n := range nodeList.Items {
+			workerNodes.Insert(n.Name)
+		}
 
 		err = framework.CheckTestingNSDeletedExcept(cs, ns)
 		framework.ExpectNoError(err)
@@ -135,7 +132,7 @@ var _ = SIGDescribe("SchedulerPredicates [Serial]", func() {
 				nodeMaxAllocatable = allocatable.Value()
 			}
 		}
-		WaitForStableCluster(cs, masterNodes)
+		WaitForStableCluster(cs, workerNodes)
 
 		pods, err := cs.CoreV1().Pods(metav1.NamespaceAll).List(context.TODO(), metav1.ListOptions{})
 		framework.ExpectNoError(err)
@@ -215,7 +212,7 @@ var _ = SIGDescribe("SchedulerPredicates [Serial]", func() {
 		var beardsecond v1.ResourceName = "example.com/beardsecond"
 
 		ginkgo.BeforeEach(func() {
-			WaitForStableCluster(cs, masterNodes)
+			WaitForStableCluster(cs, workerNodes)
 			ginkgo.By("Add RuntimeClass and fake resource")
 
 			// find a node which can run a pod:
@@ -236,16 +233,16 @@ var _ = SIGDescribe("SchedulerPredicates [Serial]", func() {
 			// Register a runtimeClass with overhead set as 25% of the available beard-seconds
 			handler = e2enode.PreconfiguredRuntimeClassHandler(framework.TestContext.ContainerRuntime)
 
-			rc := &nodev1beta1.RuntimeClass{
+			rc := &nodev1.RuntimeClass{
 				ObjectMeta: metav1.ObjectMeta{Name: handler},
 				Handler:    handler,
-				Overhead: &nodev1beta1.Overhead{
+				Overhead: &nodev1.Overhead{
 					PodFixed: v1.ResourceList{
 						beardsecond: resource.MustParse("250"),
 					},
 				},
 			}
-			_, err = cs.NodeV1beta1().RuntimeClasses().Create(context.TODO(), rc, metav1.CreateOptions{})
+			_, err = cs.NodeV1().RuntimeClasses().Create(context.TODO(), rc, metav1.CreateOptions{})
 			framework.ExpectNoError(err, "failed to create RuntimeClass resource")
 		})
 
@@ -318,12 +315,12 @@ var _ = SIGDescribe("SchedulerPredicates [Serial]", func() {
 	// 4. Create another pod with no affinity to any node that need 50% of the largest node CPU.
 	// 5. Make sure this additional pod is not scheduled.
 	/*
-		Release : v1.9
+		Release: v1.9
 		Testname: Scheduler, resource limits
 		Description: Scheduling Pods MUST fail if the resource requests exceed Machine capacity.
 	*/
 	framework.ConformanceIt("validates resource limits of pods that are allowed to run ", func() {
-		WaitForStableCluster(cs, masterNodes)
+		WaitForStableCluster(cs, workerNodes)
 		nodeMaxAllocatable := int64(0)
 		nodeToAllocatableMap := make(map[string]int64)
 		for _, node := range nodeList.Items {
@@ -428,7 +425,7 @@ var _ = SIGDescribe("SchedulerPredicates [Serial]", func() {
 	// Test Nodes does not have any label, hence it should be impossible to schedule Pod with
 	// nonempty Selector set.
 	/*
-		Release : v1.9
+		Release: v1.9
 		Testname: Scheduler, node selector not matching
 		Description: Create a Pod with a NodeSelector set to a value that does not match a node in the cluster. Since there are no nodes matching the criteria the Pod MUST not be scheduled.
 	*/
@@ -436,7 +433,7 @@ var _ = SIGDescribe("SchedulerPredicates [Serial]", func() {
 		ginkgo.By("Trying to schedule Pod with nonempty NodeSelector.")
 		podName := "restricted-pod"
 
-		WaitForStableCluster(cs, masterNodes)
+		WaitForStableCluster(cs, workerNodes)
 
 		conf := pausePodConfig{
 			Name:   podName,
@@ -451,7 +448,7 @@ var _ = SIGDescribe("SchedulerPredicates [Serial]", func() {
 	})
 
 	/*
-		Release : v1.9
+		Release: v1.9
 		Testname: Scheduler, node selector matching
 		Description: Create a label on the node {k: v}. Then create a Pod with a NodeSelector set to {k: v}. Check to see if the Pod is scheduled. When the NodeSelector matches then Pod MUST be scheduled on that node.
 	*/
@@ -491,7 +488,7 @@ var _ = SIGDescribe("SchedulerPredicates [Serial]", func() {
 		ginkgo.By("Trying to schedule Pod with nonempty NodeSelector.")
 		podName := "restricted-pod"
 
-		WaitForStableCluster(cs, masterNodes)
+		WaitForStableCluster(cs, workerNodes)
 
 		conf := pausePodConfig{
 			Name: podName,
@@ -655,14 +652,20 @@ var _ = SIGDescribe("SchedulerPredicates [Serial]", func() {
 	})
 
 	/*
-		Release : v1.16
+		Release: v1.16
 		Testname: Scheduling, HostPort matching and HostIP and Protocol not-matching
 		Description: Pods with the same HostPort value MUST be able to be scheduled to the same node
-		if the HostIP or Protocol is different.
+		if the HostIP or Protocol is different. This test doesn´t test the HostPort functionality.
+		 xref: https://github.com/kubernetes/kubernetes/issues/98075
 	*/
-	framework.ConformanceIt("validates that there is no conflict between pods with same hostPort but different hostIP and protocol", func() {
+	ginkgo.It("validates that there is no conflict between pods with same hostPort but different hostIP and protocol", func() {
 
 		nodeName := GetNodeThatCanRunPod(f)
+		localhost := "127.0.0.1"
+		if framework.TestContext.ClusterIsIPv6() {
+			localhost = "::1"
+		}
+		hostIP := getNodeHostIP(f, nodeName)
 
 		// use nodeSelector to make sure the testing pods get assigned on the same node to explicitly verify there exists conflict or not
 		ginkgo.By("Trying to apply a random label on the found node.")
@@ -677,25 +680,26 @@ var _ = SIGDescribe("SchedulerPredicates [Serial]", func() {
 		defer framework.RemoveLabelOffNode(cs, nodeName, k)
 
 		port := int32(54321)
-		ginkgo.By(fmt.Sprintf("Trying to create a pod(pod1) with hostport %v and hostIP 127.0.0.1 and expect scheduled", port))
-		createHostPortPodOnNode(f, "pod1", ns, "127.0.0.1", port, v1.ProtocolTCP, nodeSelector, true)
+		ginkgo.By(fmt.Sprintf("Trying to create a pod(pod1) with hostport %v and hostIP %s and expect scheduled", port, localhost))
+		createHostPortPodOnNode(f, "pod1", ns, localhost, port, v1.ProtocolTCP, nodeSelector, true)
 
-		ginkgo.By(fmt.Sprintf("Trying to create another pod(pod2) with hostport %v but hostIP 127.0.0.2 on the node which pod1 resides and expect scheduled", port))
-		createHostPortPodOnNode(f, "pod2", ns, "127.0.0.2", port, v1.ProtocolTCP, nodeSelector, true)
+		ginkgo.By(fmt.Sprintf("Trying to create another pod(pod2) with hostport %v but hostIP %s on the node which pod1 resides and expect scheduled", port, hostIP))
+		createHostPortPodOnNode(f, "pod2", ns, hostIP, port, v1.ProtocolTCP, nodeSelector, true)
 
-		ginkgo.By(fmt.Sprintf("Trying to create a third pod(pod3) with hostport %v, hostIP 127.0.0.2 but use UDP protocol on the node which pod2 resides", port))
-		createHostPortPodOnNode(f, "pod3", ns, "127.0.0.2", port, v1.ProtocolUDP, nodeSelector, true)
+		ginkgo.By(fmt.Sprintf("Trying to create a third pod(pod3) with hostport %v, hostIP %s but use UDP protocol on the node which pod2 resides", port, hostIP))
+		createHostPortPodOnNode(f, "pod3", ns, hostIP, port, v1.ProtocolUDP, nodeSelector, true)
+
 	})
 
 	/*
-		Release : v1.16
+		Release: v1.16
 		Testname: Scheduling, HostPort and Protocol match, HostIPs different but one is default HostIP (0.0.0.0)
 		Description: Pods with the same HostPort and Protocol, but different HostIPs, MUST NOT schedule to the
 		same node if one of those IPs is the default HostIP of 0.0.0.0, which represents all IPs on the host.
 	*/
 	framework.ConformanceIt("validates that there exists conflict between pods with same hostPort and protocol but one using 0.0.0.0 hostIP", func() {
 		nodeName := GetNodeThatCanRunPod(f)
-
+		hostIP := getNodeHostIP(f, nodeName)
 		// use nodeSelector to make sure the testing pods get assigned on the same node to explicitly verify there exists conflict or not
 		ginkgo.By("Trying to apply a random label on the found node.")
 		k := fmt.Sprintf("kubernetes.io/e2e-%s", string(uuid.NewUUID()))
@@ -712,8 +716,8 @@ var _ = SIGDescribe("SchedulerPredicates [Serial]", func() {
 		ginkgo.By(fmt.Sprintf("Trying to create a pod(pod4) with hostport %v and hostIP 0.0.0.0(empty string here) and expect scheduled", port))
 		createHostPortPodOnNode(f, "pod4", ns, "", port, v1.ProtocolTCP, nodeSelector, true)
 
-		ginkgo.By(fmt.Sprintf("Trying to create another pod(pod5) with hostport %v but hostIP 127.0.0.1 on the node which pod4 resides and expect not scheduled", port))
-		createHostPortPodOnNode(f, "pod5", ns, "127.0.0.1", port, v1.ProtocolTCP, nodeSelector, false)
+		ginkgo.By(fmt.Sprintf("Trying to create another pod(pod5) with hostport %v but hostIP %s on the node which pod4 resides and expect not scheduled", port, hostIP))
+		createHostPortPodOnNode(f, "pod5", ns, hostIP, port, v1.ProtocolTCP, nodeSelector, false)
 	})
 
 	ginkgo.Context("PodTopologySpread Filtering", func() {
@@ -817,8 +821,8 @@ func initPausePod(f *framework.Framework, conf pausePodConfig) *v1.Pod {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            conf.Name,
 			Namespace:       conf.Namespace,
-			Labels:          conf.Labels,
-			Annotations:     conf.Annotations,
+			Labels:          map[string]string{},
+			Annotations:     map[string]string{},
 			OwnerReferences: conf.OwnerReferences,
 		},
 		Spec: v1.PodSpec{
@@ -837,6 +841,12 @@ func initPausePod(f *framework.Framework, conf pausePodConfig) *v1.Pod {
 			PriorityClassName:             conf.PriorityClassName,
 			TerminationGracePeriodSeconds: &gracePeriod,
 		},
+	}
+	for key, value := range conf.Labels {
+		pod.ObjectMeta.Labels[key] = value
+	}
+	for key, value := range conf.Annotations {
+		pod.ObjectMeta.Annotations[key] = value
 	}
 	// TODO: setting the Pod's nodeAffinity instead of setting .spec.nodeName works around the
 	// Preemption e2e flake (#88441), but we should investigate deeper to get to the bottom of it.
@@ -863,8 +873,12 @@ func createPausePod(f *framework.Framework, conf pausePodConfig) *v1.Pod {
 }
 
 func runPausePod(f *framework.Framework, conf pausePodConfig) *v1.Pod {
+	return runPausePodWithTimeout(f, conf, framework.PollShortTimeout)
+}
+
+func runPausePodWithTimeout(f *framework.Framework, conf pausePodConfig, timeout time.Duration) *v1.Pod {
 	pod := createPausePod(f, conf)
-	framework.ExpectNoError(e2epod.WaitTimeoutForPodRunningInNamespace(f.ClientSet, pod.Name, pod.Namespace, framework.PollShortTimeout))
+	framework.ExpectNoError(e2epod.WaitTimeoutForPodRunningInNamespace(f.ClientSet, pod.Name, pod.Namespace, timeout))
 	pod, err := f.ClientSet.CoreV1().Pods(pod.Namespace).Get(context.TODO(), conf.Name, metav1.GetOptions{})
 	framework.ExpectNoError(err)
 	return pod
@@ -933,7 +947,7 @@ func WaitForSchedulerAfterAction(f *framework.Framework, action Action, ns, podN
 func verifyResult(c clientset.Interface, expectedScheduled int, expectedNotScheduled int, ns string) {
 	allPods, err := c.CoreV1().Pods(ns).List(context.TODO(), metav1.ListOptions{})
 	framework.ExpectNoError(err)
-	scheduledPods, notScheduledPods := GetPodsScheduled(masterNodes, allPods)
+	scheduledPods, notScheduledPods := GetPodsScheduled(workerNodes, allPods)
 
 	framework.ExpectEqual(len(notScheduledPods), expectedNotScheduled, fmt.Sprintf("Not scheduled Pods: %#v", notScheduledPods))
 	framework.ExpectEqual(len(scheduledPods), expectedScheduled, fmt.Sprintf("Scheduled Pods: %#v", scheduledPods))
@@ -1014,60 +1028,77 @@ func CreateNodeSelectorPods(f *framework.Framework, id string, replicas int, nod
 }
 
 // create pod which using hostport on the specified node according to the nodeSelector
+// it starts an http server on the exposed port
 func createHostPortPodOnNode(f *framework.Framework, podName, ns, hostIP string, port int32, protocol v1.Protocol, nodeSelector map[string]string, expectScheduled bool) {
-	hostIP = translateIPv4ToIPv6(hostIP)
-	createPausePod(f, pausePodConfig{
-		Name: podName,
-		Ports: []v1.ContainerPort{
-			{
-				HostPort:      port,
-				ContainerPort: 80,
-				Protocol:      protocol,
-				HostIP:        hostIP,
-			},
+	hostPortPod := &v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: podName,
 		},
-		NodeSelector: nodeSelector,
-	})
+		Spec: v1.PodSpec{
+			Containers: []v1.Container{
+				{
+					Name:  "agnhost",
+					Image: imageutils.GetE2EImage(imageutils.Agnhost),
+					Args:  []string{"netexec", "--http-port=8080", "--udp-port=8080"},
+					Ports: []v1.ContainerPort{
+						{
+							HostPort:      port,
+							ContainerPort: 8080,
+							Protocol:      protocol,
+							HostIP:        hostIP,
+						},
+					},
+					ReadinessProbe: &v1.Probe{
+						Handler: v1.Handler{
+							HTTPGet: &v1.HTTPGetAction{
+								Path: "/hostname",
+								Port: intstr.IntOrString{
+									IntVal: int32(8080),
+								},
+								Scheme: v1.URISchemeHTTP,
+							},
+						},
+					},
+				},
+			},
+			NodeSelector: nodeSelector,
+		},
+	}
+	_, err := f.ClientSet.CoreV1().Pods(ns).Create(context.TODO(), hostPortPod, metav1.CreateOptions{})
+	framework.ExpectNoError(err)
 
-	err := e2epod.WaitForPodNotPending(f.ClientSet, ns, podName)
+	err = e2epod.WaitForPodNotPending(f.ClientSet, ns, podName)
 	if expectScheduled {
 		framework.ExpectNoError(err)
 	}
 }
 
-// translateIPv4ToIPv6 maps an IPv4 address into a valid IPv6 address
-// adding the well known prefix "0::ffff:" https://tools.ietf.org/html/rfc2765
-// if the ip is IPv4 and the cluster IPFamily is IPv6, otherwise returns the same ip
-func translateIPv4ToIPv6(ip string) string {
-	if framework.TestContext.IPFamily == "ipv6" && ip != "" && !k8utilnet.IsIPv6String(ip) {
-		ip = "0::ffff:" + ip
-	}
-	return ip
-}
-
-// GetPodsScheduled returns a number of currently scheduled and not scheduled Pods.
-func GetPodsScheduled(masterNodes sets.String, pods *v1.PodList) (scheduledPods, notScheduledPods []v1.Pod) {
+// GetPodsScheduled returns a number of currently scheduled and not scheduled Pods on worker nodes.
+func GetPodsScheduled(workerNodes sets.String, pods *v1.PodList) (scheduledPods, notScheduledPods []v1.Pod) {
 	for _, pod := range pods.Items {
-		if !masterNodes.Has(pod.Spec.NodeName) {
-			if pod.Spec.NodeName != "" {
-				_, scheduledCondition := podutil.GetPodCondition(&pod.Status, v1.PodScheduled)
-				framework.ExpectEqual(scheduledCondition != nil, true)
-				if scheduledCondition != nil {
-					framework.ExpectEqual(scheduledCondition.Status, v1.ConditionTrue)
-					scheduledPods = append(scheduledPods, pod)
-				}
-			} else {
-				_, scheduledCondition := podutil.GetPodCondition(&pod.Status, v1.PodScheduled)
-				framework.ExpectEqual(scheduledCondition != nil, true)
-				if scheduledCondition != nil {
-					framework.ExpectEqual(scheduledCondition.Status, v1.ConditionFalse)
-					if scheduledCondition.Reason == "Unschedulable" {
-
-						notScheduledPods = append(notScheduledPods, pod)
-					}
-				}
+		if pod.Spec.NodeName != "" && workerNodes.Has(pod.Spec.NodeName) {
+			_, scheduledCondition := podutil.GetPodCondition(&pod.Status, v1.PodScheduled)
+			framework.ExpectEqual(scheduledCondition != nil, true)
+			if scheduledCondition != nil {
+				framework.ExpectEqual(scheduledCondition.Status, v1.ConditionTrue)
+				scheduledPods = append(scheduledPods, pod)
 			}
+		} else if pod.Spec.NodeName == "" {
+			notScheduledPods = append(notScheduledPods, pod)
 		}
 	}
 	return
+}
+
+// getNodeHostIP returns the first internal IP on the node matching the main Cluster IP family
+func getNodeHostIP(f *framework.Framework, nodeName string) string {
+	// Get the internal HostIP of the node
+	family := v1.IPv4Protocol
+	if framework.TestContext.ClusterIsIPv6() {
+		family = v1.IPv6Protocol
+	}
+	node, err := f.ClientSet.CoreV1().Nodes().Get(context.TODO(), nodeName, metav1.GetOptions{})
+	framework.ExpectNoError(err)
+	ips := e2enode.GetAddressesByTypeAndFamily(node, v1.NodeInternalIP, family)
+	return ips[0]
 }

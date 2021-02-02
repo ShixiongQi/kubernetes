@@ -18,6 +18,7 @@ package storage
 
 import (
 	"context"
+
 	"github.com/onsi/ginkgo"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -43,11 +44,11 @@ func verifyGCEDiskAttached(diskName string, nodeName types.NodeName) bool {
 }
 
 // initializeGCETestSpec creates a PV, PVC, and ClientPod that will run until killed by test or clean up.
-func initializeGCETestSpec(c clientset.Interface, ns string, pvConfig e2epv.PersistentVolumeConfig, pvcConfig e2epv.PersistentVolumeClaimConfig, isPrebound bool) (*v1.Pod, *v1.PersistentVolume, *v1.PersistentVolumeClaim) {
+func initializeGCETestSpec(c clientset.Interface, t *framework.TimeoutContext, ns string, pvConfig e2epv.PersistentVolumeConfig, pvcConfig e2epv.PersistentVolumeClaimConfig, isPrebound bool) (*v1.Pod, *v1.PersistentVolume, *v1.PersistentVolumeClaim) {
 	ginkgo.By("Creating the PV and PVC")
 	pv, pvc, err := e2epv.CreatePVPVC(c, pvConfig, pvcConfig, ns, isPrebound)
 	framework.ExpectNoError(err)
-	framework.ExpectNoError(e2epv.WaitOnPVandPVC(c, ns, pv, pvc))
+	framework.ExpectNoError(e2epv.WaitOnPVandPVC(c, t, ns, pv, pvc))
 
 	ginkgo.By("Creating the Client Pod")
 	clientPod, err := e2epod.CreateClientPod(c, ns, pvc)
@@ -102,7 +103,7 @@ var _ = utils.SIGDescribe("PersistentVolumes GCEPD", func() {
 			Selector:         selector,
 			StorageClassName: &emptyStorageClass,
 		}
-		clientPod, pv, pvc = initializeGCETestSpec(c, ns, pvConfig, pvcConfig, false)
+		clientPod, pv, pvc = initializeGCETestSpec(c, f.Timeouts, ns, pvConfig, pvcConfig, false)
 		node = types.NodeName(clientPod.Spec.NodeName)
 	})
 
@@ -151,14 +152,15 @@ var _ = utils.SIGDescribe("PersistentVolumes GCEPD", func() {
 	})
 
 	// Test that a Pod and PVC attached to a GCEPD successfully unmounts and detaches when the encompassing Namespace is deleted.
-	ginkgo.It("should test that deleting the Namespace of a PVC and Pod causes the successful detach of Persistent Disk [Flaky]", func() {
+	ginkgo.It("should test that deleting the Namespace of a PVC and Pod causes the successful detach of Persistent Disk", func() {
 
 		ginkgo.By("Deleting the Namespace")
 		err := c.CoreV1().Namespaces().Delete(context.TODO(), ns, metav1.DeleteOptions{})
 		framework.ExpectNoError(err)
 
-		err = framework.WaitForNamespacesDeleted(c, []string{ns}, framework.DefaultNamespaceDeletionTimeout)
-		framework.ExpectNoError(err)
+		// issue deletes for the client pod and claim, accelerating namespace controller actions
+		e2epod.DeletePodOrFail(c, clientPod.Namespace, clientPod.Name)
+		framework.ExpectNoError(e2epv.DeletePersistentVolumeClaim(c, pvc.Name, ns), "Unable to delete PVC ", pvc.Name)
 
 		ginkgo.By("Verifying Persistent Disk detaches")
 		framework.ExpectNoError(waitForPDDetach(diskName, node), "PD ", diskName, " did not detach")

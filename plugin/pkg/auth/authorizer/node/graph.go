@@ -18,10 +18,13 @@ package node
 
 import (
 	"sync"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	pvutil "k8s.io/kubernetes/pkg/api/v1/persistentvolume"
 	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
+	"k8s.io/kubernetes/pkg/features"
 	"k8s.io/kubernetes/third_party/forked/gonum/graph"
 	"k8s.io/kubernetes/third_party/forked/gonum/graph/simple"
 )
@@ -332,6 +335,10 @@ func (g *Graph) recomputeDestinationIndex_locked(n graph.Node) {
 //   pvc       -> pod
 //   svcacct   -> pod
 func (g *Graph) AddPod(pod *corev1.Pod) {
+	start := time.Now()
+	defer func() {
+		graphActionsDuration.WithLabelValues("AddPod").Observe(time.Since(start).Seconds())
+	}()
 	g.lock.Lock()
 	defer g.lock.Unlock()
 
@@ -375,8 +382,14 @@ func (g *Graph) AddPod(pod *corev1.Pod) {
 	})
 
 	for _, v := range pod.Spec.Volumes {
+		claimName := ""
 		if v.PersistentVolumeClaim != nil {
-			pvcVertex := g.getOrCreateVertex_locked(pvcVertexType, pod.Namespace, v.PersistentVolumeClaim.ClaimName)
+			claimName = v.PersistentVolumeClaim.ClaimName
+		} else if v.Ephemeral != nil && utilfeature.DefaultFeatureGate.Enabled(features.GenericEphemeralVolume) {
+			claimName = pod.Name + "-" + v.Name
+		}
+		if claimName != "" {
+			pvcVertex := g.getOrCreateVertex_locked(pvcVertexType, pod.Namespace, claimName)
 			e := newDestinationEdge(pvcVertex, podVertex, nodeVertex)
 			g.graph.SetEdge(e)
 			g.addEdgeToDestinationIndex_locked(e)
@@ -384,6 +397,10 @@ func (g *Graph) AddPod(pod *corev1.Pod) {
 	}
 }
 func (g *Graph) DeletePod(name, namespace string) {
+	start := time.Now()
+	defer func() {
+		graphActionsDuration.WithLabelValues("DeletePod").Observe(time.Since(start).Seconds())
+	}()
 	g.lock.Lock()
 	defer g.lock.Unlock()
 	g.deleteVertex_locked(podVertexType, namespace, name)
@@ -395,6 +412,10 @@ func (g *Graph) DeletePod(name, namespace string) {
 //
 //   pv -> pvc
 func (g *Graph) AddPV(pv *corev1.PersistentVolume) {
+	start := time.Now()
+	defer func() {
+		graphActionsDuration.WithLabelValues("AddPV").Observe(time.Since(start).Seconds())
+	}()
 	g.lock.Lock()
 	defer g.lock.Unlock()
 
@@ -417,6 +438,10 @@ func (g *Graph) AddPV(pv *corev1.PersistentVolume) {
 	}
 }
 func (g *Graph) DeletePV(name string) {
+	start := time.Now()
+	defer func() {
+		graphActionsDuration.WithLabelValues("DeletePV").Observe(time.Since(start).Seconds())
+	}()
 	g.lock.Lock()
 	defer g.lock.Unlock()
 	g.deleteVertex_locked(pvVertexType, "", name)
@@ -426,6 +451,10 @@ func (g *Graph) DeletePV(name string) {
 //
 //   volume attachment -> node
 func (g *Graph) AddVolumeAttachment(attachmentName, nodeName string) {
+	start := time.Now()
+	defer func() {
+		graphActionsDuration.WithLabelValues("AddVolumeAttachment").Observe(time.Since(start).Seconds())
+	}()
 	g.lock.Lock()
 	defer g.lock.Unlock()
 
@@ -440,6 +469,10 @@ func (g *Graph) AddVolumeAttachment(attachmentName, nodeName string) {
 	}
 }
 func (g *Graph) DeleteVolumeAttachment(name string) {
+	start := time.Now()
+	defer func() {
+		graphActionsDuration.WithLabelValues("DeleteVolumeAttachment").Observe(time.Since(start).Seconds())
+	}()
 	g.lock.Lock()
 	defer g.lock.Unlock()
 	g.deleteVertex_locked(vaVertexType, "", name)
@@ -449,6 +482,10 @@ func (g *Graph) DeleteVolumeAttachment(name string) {
 //
 // configmap -> node
 func (g *Graph) SetNodeConfigMap(nodeName, configMapName, configMapNamespace string) {
+	start := time.Now()
+	defer func() {
+		graphActionsDuration.WithLabelValues("SetNodeConfigMap").Observe(time.Since(start).Seconds())
+	}()
 	g.lock.Lock()
 	defer g.lock.Unlock()
 

@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package fieldmanager_test
+package fieldmanager
 
 import (
 	"strings"
@@ -25,7 +25,6 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apiserver/pkg/endpoints/handlers/fieldmanager"
 	"sigs.k8s.io/yaml"
 )
 
@@ -43,12 +42,13 @@ func (f *fakeObjectCreater) New(_ schema.GroupVersionKind) (runtime.Object, erro
 }
 
 func TestNoUpdateBeforeFirstApply(t *testing.T) {
-	f := NewTestFieldManager(schema.FromAPIVersionAndKind("v1", "Pod"))
-	f.fieldManager = fieldmanager.NewSkipNonAppliedManager(
-		f.fieldManager,
-		&fakeObjectCreater{gvk: schema.GroupVersionKind{Version: "v1", Kind: "Pod"}},
-		schema.GroupVersionKind{},
-	)
+	f := NewTestFieldManager(schema.FromAPIVersionAndKind("v1", "Pod"), false, func(m Manager) Manager {
+		return NewSkipNonAppliedManager(
+			m,
+			&fakeObjectCreater{gvk: schema.GroupVersionKind{Version: "v1", Kind: "Pod"}},
+			schema.GroupVersionKind{},
+		)
+	})
 
 	appliedObj := &unstructured.Unstructured{Object: map[string]interface{}{}}
 	if err := yaml.Unmarshal([]byte(`{
@@ -82,12 +82,13 @@ func TestNoUpdateBeforeFirstApply(t *testing.T) {
 }
 
 func TestUpdateBeforeFirstApply(t *testing.T) {
-	f := NewTestFieldManager(schema.FromAPIVersionAndKind("v1", "Pod"))
-	f.fieldManager = fieldmanager.NewSkipNonAppliedManager(
-		f.fieldManager,
-		&fakeObjectCreater{gvk: schema.GroupVersionKind{Version: "v1", Kind: "Pod"}},
-		schema.GroupVersionKind{},
-	)
+	f := NewTestFieldManager(schema.FromAPIVersionAndKind("v1", "Pod"), false, func(m Manager) Manager {
+		return NewSkipNonAppliedManager(
+			m,
+			&fakeObjectCreater{gvk: schema.GroupVersionKind{Version: "v1", Kind: "Pod"}},
+			schema.GroupVersionKind{},
+		)
+	})
 
 	updatedObj := &corev1.Pod{}
 	updatedObj.Kind = "Pod"

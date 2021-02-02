@@ -9,6 +9,7 @@ load(
 go_library(
     name = "go_default_library",
     srcs = [
+        "convert.go",
         "doc.go",
         "fake_kuberuntime_manager.go",
         "helpers.go",
@@ -27,11 +28,14 @@ go_library(
         "labels.go",
         "legacy.go",
         "security_context.go",
+        "security_context_others.go",
+        "security_context_windows.go",
     ],
     importpath = "k8s.io/kubernetes/pkg/kubelet/kuberuntime",
     deps = [
         "//pkg/api/legacyscheme:go_default_library",
         "//pkg/credentialprovider:go_default_library",
+        "//pkg/credentialprovider/plugin:go_default_library",
         "//pkg/credentialprovider/secrets:go_default_library",
         "//pkg/features:go_default_library",
         "//pkg/kubelet/cm:go_default_library",
@@ -40,13 +44,14 @@ go_library(
         "//pkg/kubelet/images:go_default_library",
         "//pkg/kubelet/kuberuntime/logs:go_default_library",
         "//pkg/kubelet/lifecycle:go_default_library",
+        "//pkg/kubelet/logs:go_default_library",
         "//pkg/kubelet/metrics:go_default_library",
         "//pkg/kubelet/prober/results:go_default_library",
         "//pkg/kubelet/runtimeclass:go_default_library",
         "//pkg/kubelet/types:go_default_library",
+        "//pkg/kubelet/util:go_default_library",
         "//pkg/kubelet/util/cache:go_default_library",
         "//pkg/kubelet/util/format:go_default_library",
-        "//pkg/kubelet/util/logreduction:go_default_library",
         "//pkg/security/apparmor:go_default_library",
         "//pkg/securitycontext:go_default_library",
         "//pkg/util/parsers:go_default_library",
@@ -64,6 +69,7 @@ go_library(
         "//staging/src/k8s.io/client-go/tools/record:go_default_library",
         "//staging/src/k8s.io/client-go/tools/reference:go_default_library",
         "//staging/src/k8s.io/client-go/util/flowcontrol:go_default_library",
+        "//staging/src/k8s.io/component-base/logs/logreduction:go_default_library",
         "//staging/src/k8s.io/cri-api/pkg/apis:go_default_library",
         "//staging/src/k8s.io/cri-api/pkg/apis/runtime/v1alpha2:go_default_library",
         "//vendor/github.com/armon/circbuf:go_default_library",
@@ -81,9 +87,6 @@ go_library(
             "//pkg/kubelet/qos:go_default_library",
             "//vendor/github.com/opencontainers/runc/libcontainer/cgroups/fs:go_default_library",
         ],
-        "@io_bazel_rules_go//go/platform:windows": [
-            "//pkg/kubelet/apis:go_default_library",
-        ],
         "//conditions:default": [],
     }),
 )
@@ -91,6 +94,7 @@ go_library(
 go_test(
     name = "go_default_test",
     srcs = [
+        "convert_test.go",
         "helpers_linux_test.go",
         "helpers_test.go",
         "instrumented_services_test.go",
@@ -102,7 +106,8 @@ go_test(
         "kuberuntime_sandbox_test.go",
         "labels_test.go",
         "legacy_test.go",
-        "security_context_test.go",
+        "security_context_others_test.go",
+        "security_context_windows_test.go",
     ],
     embed = [":go_default_library"],
     deps = [

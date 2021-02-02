@@ -31,11 +31,13 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/sets"
 	cloudprovider "k8s.io/cloud-provider"
 	cloudproviderapi "k8s.io/cloud-provider/api"
 	"k8s.io/klog/v2"
 	k8s_api_v1 "k8s.io/kubernetes/pkg/apis/core/v1"
 	v1helper "k8s.io/kubernetes/pkg/apis/core/v1/helper"
+	kubeletapis "k8s.io/kubernetes/pkg/kubelet/apis"
 	"k8s.io/kubernetes/pkg/kubelet/events"
 	"k8s.io/kubernetes/pkg/kubelet/nodestatus"
 	"k8s.io/kubernetes/pkg/kubelet/util"
@@ -103,10 +105,6 @@ func (kl *Kubelet) tryRegisterWithAPIServer(node *v1.Node) bool {
 	}
 
 	originalNode := existingNode.DeepCopy()
-	if originalNode == nil {
-		klog.Errorf("Nil %q node object", kl.nodeName)
-		return false
-	}
 
 	klog.Infof("Node %s was previously registered", kl.nodeName)
 
@@ -116,6 +114,7 @@ func (kl *Kubelet) tryRegisterWithAPIServer(node *v1.Node) bool {
 	requiresUpdate := kl.reconcileCMADAnnotationWithExistingNode(node, existingNode)
 	requiresUpdate = kl.updateDefaultLabels(node, existingNode) || requiresUpdate
 	requiresUpdate = kl.reconcileExtendedResource(node, existingNode) || requiresUpdate
+	requiresUpdate = kl.reconcileHugePageResource(node, existingNode) || requiresUpdate
 	if requiresUpdate {
 		if _, _, err := nodeutil.PatchNodeStatus(kl.kubeClient.CoreV1(), types.NodeName(kl.nodeName), originalNode, existingNode); err != nil {
 			klog.Errorf("Unable to reconcile node %q with API server: error updating node: %v", kl.nodeName, err)
@@ -126,9 +125,56 @@ func (kl *Kubelet) tryRegisterWithAPIServer(node *v1.Node) bool {
 	return true
 }
 
+// reconcileHugePageResource will update huge page capacity for each page size and remove huge page sizes no longer supported
+func (kl *Kubelet) reconcileHugePageResource(initialNode, existingNode *v1.Node) bool {
+	requiresUpdate := updateDefaultResources(initialNode, existingNode)
+	supportedHugePageResources := sets.String{}
+
+	for resourceName := range initialNode.Status.Capacity {
+		if !v1helper.IsHugePageResourceName(resourceName) {
+			continue
+		}
+		supportedHugePageResources.Insert(string(resourceName))
+
+		initialCapacity := initialNode.Status.Capacity[resourceName]
+		initialAllocatable := initialNode.Status.Allocatable[resourceName]
+
+		capacity, resourceIsSupported := existingNode.Status.Capacity[resourceName]
+		allocatable := existingNode.Status.Allocatable[resourceName]
+
+		// Add or update capacity if it the size was previously unsupported or has changed
+		if !resourceIsSupported || capacity.Cmp(initialCapacity) != 0 {
+			existingNode.Status.Capacity[resourceName] = initialCapacity.DeepCopy()
+			requiresUpdate = true
+		}
+
+		// Add or update allocatable if it the size was previously unsupported or has changed
+		if !resourceIsSupported || allocatable.Cmp(initialAllocatable) != 0 {
+			existingNode.Status.Allocatable[resourceName] = initialAllocatable.DeepCopy()
+			requiresUpdate = true
+		}
+
+	}
+
+	for resourceName := range existingNode.Status.Capacity {
+		if !v1helper.IsHugePageResourceName(resourceName) {
+			continue
+		}
+
+		// If huge page size no longer is supported, we remove it from the node
+		if !supportedHugePageResources.Has(string(resourceName)) {
+			delete(existingNode.Status.Capacity, resourceName)
+			delete(existingNode.Status.Allocatable, resourceName)
+			klog.Infof("Removing now unsupported huge page resource named: %s", resourceName)
+			requiresUpdate = true
+		}
+	}
+	return requiresUpdate
+}
+
 // Zeros out extended resource capacity during reconciliation.
 func (kl *Kubelet) reconcileExtendedResource(initialNode, node *v1.Node) bool {
-	requiresUpdate := false
+	requiresUpdate := updateDefaultResources(initialNode, node)
 	// Check with the device manager to see if node has been recreated, in which case extended resources should be zeroed until they are available
 	if kl.containerManager.ShouldResetExtendedResourceCapacity() {
 		for k := range node.Status.Capacity {
@@ -143,19 +189,44 @@ func (kl *Kubelet) reconcileExtendedResource(initialNode, node *v1.Node) bool {
 	return requiresUpdate
 }
 
+// updateDefaultResources will set the default resources on the existing node according to the initial node
+func updateDefaultResources(initialNode, existingNode *v1.Node) bool {
+	requiresUpdate := false
+	if existingNode.Status.Capacity == nil {
+		if initialNode.Status.Capacity != nil {
+			existingNode.Status.Capacity = initialNode.Status.Capacity.DeepCopy()
+			requiresUpdate = true
+		} else {
+			existingNode.Status.Capacity = make(map[v1.ResourceName]resource.Quantity)
+		}
+	}
+
+	if existingNode.Status.Allocatable == nil {
+		if initialNode.Status.Allocatable != nil {
+			existingNode.Status.Allocatable = initialNode.Status.Allocatable.DeepCopy()
+			requiresUpdate = true
+		} else {
+			existingNode.Status.Allocatable = make(map[v1.ResourceName]resource.Quantity)
+		}
+	}
+	return requiresUpdate
+}
+
 // updateDefaultLabels will set the default labels on the node
 func (kl *Kubelet) updateDefaultLabels(initialNode, existingNode *v1.Node) bool {
 	defaultLabels := []string{
 		v1.LabelHostname,
-		v1.LabelZoneFailureDomainStable,
-		v1.LabelZoneRegionStable,
-		v1.LabelZoneFailureDomain,
-		v1.LabelZoneRegion,
+		v1.LabelTopologyZone,
+		v1.LabelTopologyRegion,
+		v1.LabelFailureDomainBetaZone,
+		v1.LabelFailureDomainBetaRegion,
 		v1.LabelInstanceTypeStable,
 		v1.LabelInstanceType,
 		v1.LabelOSStable,
 		v1.LabelArchStable,
 		v1.LabelWindowsBuild,
+		kubeletapis.LabelOS,
+		kubeletapis.LabelArch,
 	}
 
 	needsUpdate := false
@@ -218,9 +289,11 @@ func (kl *Kubelet) initialNode(ctx context.Context) (*v1.Node, error) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name: string(kl.nodeName),
 			Labels: map[string]string{
-				v1.LabelHostname:   kl.hostname,
-				v1.LabelOSStable:   goruntime.GOOS,
-				v1.LabelArchStable: goruntime.GOARCH,
+				v1.LabelHostname:      kl.hostname,
+				v1.LabelOSStable:      goruntime.GOOS,
+				v1.LabelArchStable:    goruntime.GOARCH,
+				kubeletapis.LabelOS:   goruntime.GOOS,
+				kubeletapis.LabelArch: goruntime.GOARCH,
 			},
 		},
 		Spec: v1.NodeSpec{
@@ -286,17 +359,17 @@ func (kl *Kubelet) initialNode(ctx context.Context) (*v1.Node, error) {
 			node.Annotations = make(map[string]string)
 		}
 
-		klog.Infof("Setting node annotation to enable volume controller attach/detach")
+		klog.V(2).Infof("Setting node annotation to enable volume controller attach/detach")
 		node.Annotations[volutil.ControllerManagedAttachAnnotation] = "true"
 	} else {
-		klog.Infof("Controller attach/detach is disabled for this node; Kubelet will attach and detach volumes")
+		klog.V(2).Infof("Controller attach/detach is disabled for this node; Kubelet will attach and detach volumes")
 	}
 
 	if kl.keepTerminatedPodVolumes {
 		if node.Annotations == nil {
 			node.Annotations = make(map[string]string)
 		}
-		klog.Infof("Setting node annotation to keep pod volumes of terminated pods attached to the node")
+		klog.V(2).Infof("Setting node annotation to keep pod volumes of terminated pods attached to the node")
 		node.Annotations[volutil.KeepTerminatedPodVolumesAnnotation] = "true"
 	}
 
@@ -347,16 +420,16 @@ func (kl *Kubelet) initialNode(ctx context.Context) (*v1.Node, error) {
 				return nil, fmt.Errorf("failed to get zone from cloud provider: %v", err)
 			}
 			if zone.FailureDomain != "" {
-				klog.Infof("Adding node label from cloud provider: %s=%s", v1.LabelZoneFailureDomain, zone.FailureDomain)
-				node.ObjectMeta.Labels[v1.LabelZoneFailureDomain] = zone.FailureDomain
-				klog.Infof("Adding node label from cloud provider: %s=%s", v1.LabelZoneFailureDomainStable, zone.FailureDomain)
-				node.ObjectMeta.Labels[v1.LabelZoneFailureDomainStable] = zone.FailureDomain
+				klog.Infof("Adding node label from cloud provider: %s=%s", v1.LabelFailureDomainBetaZone, zone.FailureDomain)
+				node.ObjectMeta.Labels[v1.LabelFailureDomainBetaZone] = zone.FailureDomain
+				klog.Infof("Adding node label from cloud provider: %s=%s", v1.LabelTopologyZone, zone.FailureDomain)
+				node.ObjectMeta.Labels[v1.LabelTopologyZone] = zone.FailureDomain
 			}
 			if zone.Region != "" {
-				klog.Infof("Adding node label from cloud provider: %s=%s", v1.LabelZoneRegion, zone.Region)
-				node.ObjectMeta.Labels[v1.LabelZoneRegion] = zone.Region
-				klog.Infof("Adding node label from cloud provider: %s=%s", v1.LabelZoneRegionStable, zone.Region)
-				node.ObjectMeta.Labels[v1.LabelZoneRegionStable] = zone.Region
+				klog.Infof("Adding node label from cloud provider: %s=%s", v1.LabelFailureDomainBetaRegion, zone.Region)
+				node.ObjectMeta.Labels[v1.LabelFailureDomainBetaRegion] = zone.Region
+				klog.Infof("Adding node label from cloud provider: %s=%s", v1.LabelTopologyRegion, zone.Region)
+				node.ObjectMeta.Labels[v1.LabelTopologyRegion] = zone.Region
 			}
 		}
 	}
@@ -479,8 +552,6 @@ func (kl *Kubelet) tryUpdateNodeStatus(tryNumber int) error {
 // message for the node.
 func (kl *Kubelet) recordNodeStatusEvent(eventType, event string) {
 	klog.V(2).Infof("Recording %s event message for node %s", event, kl.nodeName)
-	// TODO: This requires a transaction, either both node status is updated
-	// and event is recorded or neither should happen, see issue #6055.
 	kl.recorder.Eventf(kl.nodeRef, eventType, event, "Node %s status is now: %s", kl.nodeName, event)
 }
 
@@ -542,7 +613,7 @@ func (kl *Kubelet) defaultNodeStatusFuncs() []func(*v1.Node) error {
 	}
 	var setters []func(n *v1.Node) error
 	setters = append(setters,
-		nodestatus.NodeAddress(kl.nodeIP, kl.nodeIPValidator, kl.hostname, kl.hostnameOverridden, kl.externalCloudProvider, kl.cloud, nodeAddressesFunc),
+		nodestatus.NodeAddress(kl.nodeIPs, kl.nodeIPValidator, kl.hostname, kl.hostnameOverridden, kl.externalCloudProvider, kl.cloud, nodeAddressesFunc),
 		nodestatus.MachineInfo(string(kl.nodeName), kl.maxPods, kl.podsPerCore, kl.GetCachedMachineInfo, kl.containerManager.GetCapacity,
 			kl.containerManager.GetDevicePluginResourceCapacity, kl.containerManager.GetNodeAllocatableReservation, kl.recordEvent),
 		nodestatus.VersionInfo(kl.cadvisor.VersionInfo, kl.containerRuntime.Type, kl.containerRuntime.Version),
@@ -557,7 +628,7 @@ func (kl *Kubelet) defaultNodeStatusFuncs() []func(*v1.Node) error {
 		nodestatus.MemoryPressureCondition(kl.clock.Now, kl.evictionManager.IsUnderMemoryPressure, kl.recordNodeStatusEvent),
 		nodestatus.DiskPressureCondition(kl.clock.Now, kl.evictionManager.IsUnderDiskPressure, kl.recordNodeStatusEvent),
 		nodestatus.PIDPressureCondition(kl.clock.Now, kl.evictionManager.IsUnderPIDPressure, kl.recordNodeStatusEvent),
-		nodestatus.ReadyCondition(kl.clock.Now, kl.runtimeState.runtimeErrors, kl.runtimeState.networkErrors, kl.runtimeState.storageErrors, validateHostFunc, kl.containerManager.Status, kl.recordNodeStatusEvent),
+		nodestatus.ReadyCondition(kl.clock.Now, kl.runtimeState.runtimeErrors, kl.runtimeState.networkErrors, kl.runtimeState.storageErrors, validateHostFunc, kl.containerManager.Status, kl.shutdownManager.ShutdownStatus, kl.recordNodeStatusEvent),
 		nodestatus.VolumesInUse(kl.volumeManager.ReconcilerStatesHasBeenSynced, kl.volumeManager.GetVolumesInUse),
 		// TODO(mtaufen): I decided not to move this setter for now, since all it does is send an event
 		// and record state back to the Kubelet runtime object. In the future, I'd like to isolate

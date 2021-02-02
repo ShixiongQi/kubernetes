@@ -40,6 +40,7 @@ import (
 	"k8s.io/klog/v2"
 )
 
+// Attention: blob disk feature is deprecated
 const (
 	vhdContainerName         = "vhds"
 	useHTTPSForBlobBasedDisk = true
@@ -84,7 +85,15 @@ func (c *BlobDiskController) initStorageAccounts() {
 // If no storage account is given, search all the storage accounts associated with the resource group and pick one that
 // fits storage type and location.
 func (c *BlobDiskController) CreateVolume(blobName, accountName, accountType, location string, requestGB int) (string, string, int, error) {
-	account, key, err := c.common.cloud.EnsureStorageAccount(accountName, accountType, string(defaultStorageAccountKind), c.common.resourceGroup, location, dedicatedDiskAccountNamePrefix)
+	accountOptions := &AccountOptions{
+		Name:                   accountName,
+		Type:                   accountType,
+		Kind:                   string(defaultStorageAccountKind),
+		ResourceGroup:          c.common.resourceGroup,
+		Location:               location,
+		EnableHTTPSTrafficOnly: true,
+	}
+	account, key, err := c.common.cloud.EnsureStorageAccount(accountOptions, dedicatedDiskAccountNamePrefix)
 	if err != nil {
 		return "", "", 0, fmt.Errorf("could not get storage key for storage account %s: %v", accountName, err)
 	}
@@ -245,7 +254,7 @@ func (c *BlobDiskController) CreateBlobDisk(dataDiskName string, storageAccountT
 
 //DeleteBlobDisk : delete a blob disk from a node
 func (c *BlobDiskController) DeleteBlobDisk(diskURI string) error {
-	storageAccountName, vhdName, err := diskNameandSANameFromURI(diskURI)
+	storageAccountName, vhdName, err := diskNameAndSANameFromURI(diskURI)
 	if err != nil {
 		return err
 	}
@@ -459,13 +468,13 @@ func (c *BlobDiskController) getAllStorageAccounts() (map[string]*storageAccount
 		}
 		klog.Infof("azureDisk - identified account %s as part of shared PVC accounts", *v.Name)
 
-		sastate := &storageAccountState{
+		saState := &storageAccountState{
 			name:      *v.Name,
 			saType:    (*v.Sku).Name,
 			diskCount: -1,
 		}
 
-		accounts[*v.Name] = sastate
+		accounts[*v.Name] = saState
 	}
 
 	return accounts, nil
@@ -569,7 +578,7 @@ func (c *BlobDiskController) findSANameForDisk(storageAccountType storage.SkuNam
 	disksAfter := totalDiskCounts + 1 // with the new one!
 
 	avgUtilization := float64(disksAfter) / float64(countAccounts*maxDisksPerStorageAccounts)
-	aboveAvg := (avgUtilization > storageAccountUtilizationBeforeGrowing)
+	aboveAvg := avgUtilization > storageAccountUtilizationBeforeGrowing
 
 	// avg are not create and we should create more accounts if we can
 	if aboveAvg && countAccounts < maxStorageAccounts {
@@ -622,7 +631,7 @@ func createVHDHeader(size uint64) ([]byte, error) {
 	return b.Bytes(), nil
 }
 
-func diskNameandSANameFromURI(diskURI string) (string, string, error) {
+func diskNameAndSANameFromURI(diskURI string) (string, string, error) {
 	uri, err := url.Parse(diskURI)
 	if err != nil {
 		return "", "", err

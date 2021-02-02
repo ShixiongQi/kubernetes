@@ -119,7 +119,7 @@ func TestAllPrimitiveFieldPaths(t *testing.T) {
 		unexpected := result.Difference(expect)
 
 		if len(missing) > 0 {
-			t.Errorf("the following fields were exepcted, but missing from the result:\n%s", strings.Join(missing.List(), "\n"))
+			t.Errorf("the following fields were expected, but missing from the result:\n%s", strings.Join(missing.List(), "\n"))
 		}
 		if len(unexpected) > 0 {
 			t.Errorf("the following fields were in the result, but unexpected:\n%s", strings.Join(unexpected.List(), "\n"))
@@ -152,6 +152,7 @@ var (
 		"CPUManagerPolicy",
 		"CPUManagerReconcilePeriod.Duration",
 		"TopologyManagerPolicy",
+		"TopologyManagerScope",
 		"QOSReserved[*]",
 		"CgroupDriver",
 		"CgroupRoot",
@@ -165,6 +166,8 @@ var (
 		"EnableContentionProfiling",
 		"EnableControllerAttachDetach",
 		"EnableDebuggingHandlers",
+		"EnableServer",
+		"EnableSystemLogHandler",
 		"EnforceNodeAllocatable[*]",
 		"EventBurst",
 		"EventRecordQPS",
@@ -181,6 +184,8 @@ var (
 		"HairpinMode",
 		"HealthzBindAddress",
 		"HealthzPort",
+		"Logging.Format",
+		"Logging.Sanitization",
 		"TLSCipherSuites[*]",
 		"TLSMinVersion",
 		"IPTablesDropBit",
@@ -188,6 +193,7 @@ var (
 		"ImageGCHighThresholdPercent",
 		"ImageGCLowThresholdPercent",
 		"ImageMinimumGCAge.Duration",
+		"KernelMemcgNotification",
 		"KubeAPIBurst",
 		"KubeAPIQPS",
 		"KubeReservedCgroup",
@@ -200,15 +206,17 @@ var (
 		"StaticPodURLHeader[*][*]",
 		"MaxOpenFiles",
 		"MaxPods",
+		"NodeLeaseDurationSeconds",
+		"NodeStatusMaxImages",
 		"NodeStatusUpdateFrequency.Duration",
 		"NodeStatusReportFrequency.Duration",
-		"NodeLeaseDurationSeconds",
 		"OOMScoreAdj",
 		"PodCIDR",
 		"PodPidsLimit",
 		"PodsPerCore",
 		"Port",
 		"ProtectKernelDefaults",
+		"ProviderID",
 		"ReadOnlyPort",
 		"RegistryBurst",
 		"RegistryPullQPS",
@@ -226,5 +234,7 @@ var (
 		"TypeMeta.Kind",
 		"VolumeStatsAggPeriod.Duration",
 		"VolumePluginDir",
+		"ShutdownGracePeriod.Duration",
+		"ShutdownGracePeriodCriticalPods.Duration",
 	)
 )

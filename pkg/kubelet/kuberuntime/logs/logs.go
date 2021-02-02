@@ -35,6 +35,7 @@ import (
 	"k8s.io/api/core/v1"
 	internalapi "k8s.io/cri-api/pkg/apis"
 	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
+	"k8s.io/kubernetes/pkg/kubelet/types"
 	"k8s.io/kubernetes/pkg/util/tail"
 )
 
@@ -47,8 +48,10 @@ import (
 // TODO(random-liu): Support log rotation.
 
 const (
-	// timeFormat is the time format used in the log.
-	timeFormat = time.RFC3339Nano
+	// timeFormatOut is the format for writing timestamps to output.
+	timeFormatOut = types.RFC3339NanoFixed
+	// timeFormatIn is the format for parsing timestamps from other logs.
+	timeFormatIn = types.RFC3339NanoLenient
 
 	// logForceCheckPeriod is the period to check for a new read
 	logForceCheckPeriod = 1 * time.Second
@@ -128,9 +131,9 @@ func parseCRILog(log []byte, msg *logMessage) error {
 	if idx < 0 {
 		return fmt.Errorf("timestamp is not found")
 	}
-	msg.timestamp, err = time.Parse(timeFormat, string(log[:idx]))
+	msg.timestamp, err = time.Parse(timeFormatIn, string(log[:idx]))
 	if err != nil {
-		return fmt.Errorf("unexpected timestamp format %q: %v", timeFormat, err)
+		return fmt.Errorf("unexpected timestamp format %q: %v", timeFormatIn, err)
 	}
 
 	// Parse stream type
@@ -152,7 +155,7 @@ func parseCRILog(log []byte, msg *logMessage) error {
 	}
 	// Keep this forward compatible.
 	tags := bytes.Split(log[:idx], tagDelimiter)
-	partial := (runtimeapi.LogTag(tags[0]) == runtimeapi.LogTagPartial)
+	partial := runtimeapi.LogTag(tags[0]) == runtimeapi.LogTagPartial
 	// Trim the tailing new line if this is a partial line.
 	if partial && len(log) > 0 && log[len(log)-1] == '\n' {
 		log = log[:len(log)-1]
@@ -238,7 +241,7 @@ func (w *logWriter) write(msg *logMessage) error {
 	}
 	line := msg.log
 	if w.opts.timestamp {
-		prefix := append([]byte(msg.timestamp.Format(timeFormat)), delimiter[0])
+		prefix := append([]byte(msg.timestamp.Format(timeFormatOut)), delimiter[0])
 		line = append(prefix, line...)
 	}
 	// If the line is longer than the remaining bytes, cut it.
@@ -300,6 +303,8 @@ func ReadLogs(ctx context.Context, path, containerID string, opts *LogOptions, r
 		return fmt.Errorf("failed to seek %d in log file %q: %v", start, path, err)
 	}
 
+	limitedMode := (opts.tail >= 0) && (!opts.follow)
+	limitedNum := opts.tail
 	// Start parsing the logs.
 	r := bufio.NewReader(f)
 	// Do not create watcher here because it is not needed if `Follow` is false.
@@ -310,7 +315,7 @@ func ReadLogs(ctx context.Context, path, containerID string, opts *LogOptions, r
 	writer := newLogWriter(stdout, stderr, opts)
 	msg := &logMessage{}
 	for {
-		if stop {
+		if stop || (limitedMode && limitedNum == 0) {
 			klog.V(2).Infof("Finish parsing log file %q", path)
 			return nil
 		}
@@ -398,6 +403,10 @@ func ReadLogs(ctx context.Context, path, containerID string, opts *LogOptions, r
 			klog.Errorf("Failed with err %v when writing log for log file %q: %+v", err, path, msg)
 			return err
 		}
+		if limitedMode {
+			limitedNum--
+		}
+
 	}
 }
 
