@@ -673,7 +673,8 @@ func (m *kubeGenericRuntimeManager) computePodActions(pod *v1.Pod, podStatus *ku
 //  6. Create init containers.
 //  7. Create normal containers.
 func (m *kubeGenericRuntimeManager) SyncPod(pod *v1.Pod, podStatus *kubecontainer.PodStatus, pullSecrets []v1.Secret, backOff *flowcontrol.Backoff) (result kubecontainer.PodSyncResult) {
-	klog.Infof("SQI009 time: %+v for pod %q", metav1.Now().String(), format.Pod(pod))
+	klog.Infof("SQI009_TRACEPOINT [Start-of-SyncPod] time: %+v for pod %q", metav1.Now().String(), format.Pod(pod))
+	klog.Infof("SQI009_TRACEPOINT [Compute sandbox and container changes] time: %+v for pod %q", metav1.Now().String(), format.Pod(pod))
 	// Step 1: Compute sandbox and container changes.
 	podContainerChanges := m.computePodActions(pod, podStatus)
 	klog.V(3).Infof("computePodActions got %+v for pod %q", podContainerChanges, format.Pod(pod))
@@ -688,7 +689,7 @@ func (m *kubeGenericRuntimeManager) SyncPod(pod *v1.Pod, podStatus *kubecontaine
 			klog.V(4).Infof("SyncPod received new pod %q, will create a sandbox for it", format.Pod(pod))
 		}
 	}
-
+	klog.Infof("SQI009_TRACEPOINT [Kill the pod if the sandbox has changed] time: %+v for pod %q", metav1.Now().String(), format.Pod(pod))
 	// Step 2: Kill the pod if the sandbox has changed.
 	if podContainerChanges.KillPod {
 		if podContainerChanges.CreateSandbox {
@@ -740,7 +741,7 @@ func (m *kubeGenericRuntimeManager) SyncPod(pod *v1.Pod, podStatus *kubecontaine
 	if podStatus != nil {
 		podIPs = podStatus.IPs
 	}
-
+	klog.Infof("SQI009_TRACEPOINT [Create a sandbox for the pod if necessary] time: %+v for pod %q", metav1.Now().String(), format.Pod(pod))
 	// Step 4: Create a sandbox for the pod if necessary.
 	podSandboxID := podContainerChanges.SandboxID
 	if podContainerChanges.CreateSandbox {
@@ -750,7 +751,9 @@ func (m *kubeGenericRuntimeManager) SyncPod(pod *v1.Pod, podStatus *kubecontaine
 		klog.V(4).Infof("Creating PodSandbox for pod %q", format.Pod(pod))
 		createSandboxResult := kubecontainer.NewSyncResult(kubecontainer.CreatePodSandbox, format.Pod(pod))
 		result.AddSyncResult(createSandboxResult)
+		klog.Infof("SQI009_TRACEPOINT [Start-createPodSandbox()] time: %+v for pod %q", metav1.Now().String(), format.Pod(pod))
 		podSandboxID, msg, err = m.createPodSandbox(pod, podContainerChanges.Attempt)
+		klog.Infof("SQI009_TRACEPOINT [End-createPodSandbox()] time: %+v for pod %q", metav1.Now().String(), format.Pod(pod))
 		if err != nil {
 			createSandboxResult.Fail(kubecontainer.ErrCreatePodSandbox, msg)
 			klog.Errorf("createPodSandbox for pod %q failed: %v", format.Pod(pod), err)
@@ -791,7 +794,7 @@ func (m *kubeGenericRuntimeManager) SyncPod(pod *v1.Pod, podStatus *kubecontaine
 	if len(podIPs) != 0 {
 		podIP = podIPs[0]
 	}
-
+	klog.Infof("SQI009_TRACEPOINT [Get podSandboxConfig for containers to start] time: %+v for pod %q", metav1.Now().String(), format.Pod(pod))
 	// Get podSandboxConfig for containers to start.
 	configPodSandboxResult := kubecontainer.NewSyncResult(kubecontainer.ConfigPodSandbox, podSandboxID)
 	result.AddSyncResult(configPodSandboxResult)
@@ -802,7 +805,7 @@ func (m *kubeGenericRuntimeManager) SyncPod(pod *v1.Pod, podStatus *kubecontaine
 		configPodSandboxResult.Fail(kubecontainer.ErrConfigPodSandbox, message)
 		return
 	}
-
+	klog.Infof("SQI009_TRACEPOINT [Function definition: start := func(typeName string, spec *startSpec)] time: %+v for pod %q", metav1.Now().String(), format.Pod(pod))
 	// Helper containing boilerplate common to starting all types of containers.
 	// typeName is a label used to describe this type of container in log messages,
 	// currently: "container", "init container" or "ephemeral container"
@@ -834,7 +837,7 @@ func (m *kubeGenericRuntimeManager) SyncPod(pod *v1.Pod, podStatus *kubecontaine
 
 		return nil
 	}
-
+	klog.Infof("SQI009_TRACEPOINT [start ephemeral containers] time: %+v for pod %q", metav1.Now().String(), format.Pod(pod))
 	// Step 5: start ephemeral containers
 	// These are started "prior" to init containers to allow running ephemeral containers even when there
 	// are errors starting an init container. In practice init containers will start first since ephemeral
@@ -844,7 +847,7 @@ func (m *kubeGenericRuntimeManager) SyncPod(pod *v1.Pod, podStatus *kubecontaine
 			start("ephemeral container", ephemeralContainerStartSpec(&pod.Spec.EphemeralContainers[idx]))
 		}
 	}
-
+	klog.Infof("SQI009_TRACEPOINT [start the init containers] time: %+v for pod %q", metav1.Now().String(), format.Pod(pod))
 	// Step 6: start the init container.
 	if container := podContainerChanges.NextInitContainerToStart; container != nil {
 		// Start the next init container.
@@ -855,12 +858,12 @@ func (m *kubeGenericRuntimeManager) SyncPod(pod *v1.Pod, podStatus *kubecontaine
 		// Successfully started the container; clear the entry in the failure
 		klog.V(4).Infof("Completed init container %q for pod %q", container.Name, format.Pod(pod))
 	}
-
+	klog.Infof("SQI009_TRACEPOINT [start containers in podContainerChanges.ContainersToStart] time: %+v for pod %q", metav1.Now().String(), format.Pod(pod))
 	// Step 7: start containers in podContainerChanges.ContainersToStart.
 	for _, idx := range podContainerChanges.ContainersToStart {
 		start("container", containerStartSpec(&pod.Spec.Containers[idx]))
 	}
-
+	klog.Infof("SQI009_TRACEPOINT [END-of-SyncPod] time: %+v for pod %q", metav1.Now().String(), format.Pod(pod))
 	return
 }
 
