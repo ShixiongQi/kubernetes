@@ -425,8 +425,8 @@ func (sched *Scheduler) finishBinding(fwk framework.Framework, assumed *v1.Pod, 
 
 // scheduleOne does the entire scheduling workflow for a single pod. It is serialized on the scheduling algorithm's host fitting.
 func (sched *Scheduler) scheduleOne(ctx context.Context) {
-	start_ts := time.Now() // sqi009
-	klog.Infof("Attempting to schedule pod", "pod", klog.KObj(pod))
+	// start_ts := time.Now() // sqi009
+	// klog.Infof("Attempting to schedule pod", "pod", klog.KObj(pod))
 	podInfo := sched.NextPod()
 	// pod could be nil when schedulerQueue is closed
 	if podInfo == nil || podInfo.Pod == nil {
