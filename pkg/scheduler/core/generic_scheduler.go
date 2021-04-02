@@ -95,12 +95,14 @@ func (g *genericScheduler) snapshot() error {
 // If it succeeds, it will return the name of the node.
 // If it fails, it will return a FitError error with reasons.
 func (g *genericScheduler) Schedule(ctx context.Context, fwk framework.Framework, state *framework.CycleState, pod *v1.Pod) (result ScheduleResult, err error) {
+	klog.Infof("[sqi009| timestamp: %d | pod: %s] Head in Schedule()", time.Now().UnixNano(), pod.Name) // sqi009
 	trace := utiltrace.New("Scheduling", utiltrace.Field{Key: "namespace", Value: pod.Namespace}, utiltrace.Field{Key: "name", Value: pod.Name})
 	defer trace.LogIfLong(100 * time.Millisecond)
 
 	if err := g.snapshot(); err != nil {
 		return result, err
 	}
+	klog.Infof("[sqi009| timestamp: %d | pod: %s] Snapshotting scheduler cache and node infos done", time.Now().UnixNano(), pod.Name) // sqi009
 	trace.Step("Snapshotting scheduler cache and node infos done")
 
 	if g.nodeInfoSnapshot.NumNodes() == 0 {
@@ -111,6 +113,7 @@ func (g *genericScheduler) Schedule(ctx context.Context, fwk framework.Framework
 	if err != nil {
 		return result, err
 	}
+	klog.Infof("[sqi009| timestamp: %d | pod: %s] Computing predicates done", time.Now().UnixNano(), pod.Name) // sqi009
 	trace.Step("Computing predicates done")
 
 	if len(feasibleNodes) == 0 {
@@ -136,6 +139,7 @@ func (g *genericScheduler) Schedule(ctx context.Context, fwk framework.Framework
 	}
 
 	host, err := g.selectHost(priorityList)
+	klog.Infof("[sqi009| timestamp: %d | pod: %s] Prioritizing done", time.Now().UnixNano(), pod.Name) // sqi009
 	trace.Step("Prioritizing done")
 
 	return ScheduleResult{

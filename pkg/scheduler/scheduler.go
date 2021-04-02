@@ -425,8 +425,6 @@ func (sched *Scheduler) finishBinding(fwk framework.Framework, assumed *v1.Pod, 
 
 // scheduleOne does the entire scheduling workflow for a single pod. It is serialized on the scheduling algorithm's host fitting.
 func (sched *Scheduler) scheduleOne(ctx context.Context) {
-	// start_ts := time.Now() // sqi009
-	// klog.Infof("Attempting to schedule pod", "pod", klog.KObj(pod))
 	podInfo := sched.NextPod()
 	// pod could be nil when schedulerQueue is closed
 	if podInfo == nil || podInfo.Pod == nil {
@@ -444,6 +442,7 @@ func (sched *Scheduler) scheduleOne(ctx context.Context) {
 		return
 	}
 	// klog.Infof("[sqi009] Attempting to schedule pod %v", time.Now().Sub(start)) // sqi009
+	klog.Infof("[sqi009| timestamp: %d | pod: %s] Attempting to schedule pod", time.Now().UnixNano(), pod.Name) // sqi009
 	klog.V(3).InfoS("Attempting to schedule pod", "pod", klog.KObj(pod))
 
 	// Synchronously attempt to find a fit for the pod.
@@ -491,7 +490,8 @@ func (sched *Scheduler) scheduleOne(ctx context.Context) {
 		sched.recordSchedulingFailure(fwk, podInfo, err, v1.PodReasonUnschedulable, nominatedNode)
 		return
 	}
-	klog.Infof("[sqi009] SchedulingAlgorithmLatency %v", time.Now().Sub(start)) // sqi009
+	klog.Infof("[sqi009| timestamp: %d | pod: %s] Scheduling algorithm done", time.Now().UnixNano(), pod.Name) // sqi009
+	// klog.Infof("[sqi009] SchedulingAlgorithmLatency %v", time.Now().Sub(start)) // sqi009
 	metrics.SchedulingAlgorithmLatency.Observe(metrics.SinceInSeconds(start))
 	// Tell the cache to assume that a pod now is running on a given node, even though it hasn't been bound yet.
 	// This allows us to keep scheduling without waiting on binding to occur.
@@ -509,7 +509,7 @@ func (sched *Scheduler) scheduleOne(ctx context.Context) {
 		sched.recordSchedulingFailure(fwk, assumedPodInfo, err, SchedulerError, "")
 		return
 	}
-
+	klog.Infof("[sqi009| timestamp: %d | pod: %s] Assume pod done", time.Now().UnixNano(), pod.Name) // sqi009
 	// Run the Reserve method of reserve plugins.
 	if sts := fwk.RunReservePluginsReserve(schedulingCycleCtx, state, assumedPod, scheduleResult.SuggestedHost); !sts.IsSuccess() {
 		metrics.PodScheduleError(fwk.ProfileName(), metrics.SinceInSeconds(start))
@@ -521,7 +521,8 @@ func (sched *Scheduler) scheduleOne(ctx context.Context) {
 		sched.recordSchedulingFailure(fwk, assumedPodInfo, sts.AsError(), SchedulerError, "")
 		return
 	}
-	klog.Infof("[sqi009] Latency of run the reserve method of reserve plugins %v", time.Now().Sub(start)) // sqi009
+	klog.Infof("[sqi009| timestamp: %d | pod: %s] Run Reserve Plugins Reserve done", time.Now().UnixNano(), pod.Name) // sqi009
+	// klog.Infof("[sqi009] Latency of run the reserve method of reserve plugins %v", time.Now().Sub(start)) // sqi009
 	// Run "permit" plugins.
 	runPermitStatus := fwk.RunPermitPlugins(schedulingCycleCtx, state, assumedPod, scheduleResult.SuggestedHost)
 	if runPermitStatus.Code() != framework.Wait && !runPermitStatus.IsSuccess() {
@@ -541,7 +542,8 @@ func (sched *Scheduler) scheduleOne(ctx context.Context) {
 		sched.recordSchedulingFailure(fwk, assumedPodInfo, runPermitStatus.AsError(), reason, "")
 		return
 	}
-	klog.Infof("[sqi009] Latency of run permit plugins %v", time.Now().Sub(start)) // sqi009
+	klog.Infof("[sqi009| timestamp: %d | pod: %s] Run permit plugins", time.Now().UnixNano(), pod.Name) // sqi009
+	// klog.Infof("[sqi009] Latency of run permit plugins %v", time.Now().Sub(start)) // sqi009
 	// bind the pod to its host asynchronously (we can do this b/c of the assumption step above).
 	go func() {
 		bindingCycleCtx, cancel := context.WithCancel(ctx)
