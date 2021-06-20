@@ -40,85 +40,15 @@ import (
 	utilslice "k8s.io/kubernetes/pkg/util/slice"
 	utilexec "k8s.io/utils/exec"
 	// package for ebpf
-	"net"
-	"github.com/containernetworking/plugins/pkg/ns"
-	bpf "github.com/iovisor/gobpf/bcc"
+	// "net"
+	"log"
+	osexec "os/exec"
+	"os"
+	"runtime"
+	"syscall"
+
+	"golang.org/x/sys/unix"
 )
-
-/*
-#cgo CFLAGS: -I/usr/include/bcc/compat
-#cgo LDFLAGS: -lbcc
-#include <bcc/bcc_common.h>
-#include <bcc/libbpf.h>
-void perf_reader_free(void *ptr);
-*/
-import "C"
-
-const source string = `
-#define KBUILD_MODNAME "foo"
-#include <uapi/linux/bpf.h>
-#include <linux/in.h>
-#include <linux/if_ether.h>
-#include <linux/if_packet.h>
-#include <linux/if_vlan.h>
-#include <linux/ip.h>
-#include <linux/ipv6.h>
-BPF_TABLE("array", int, long, dropcnt, 256);
-static inline int parse_ipv4(void *data, u64 nh_off, void *data_end) {
-    struct iphdr *iph = data + nh_off;
-    if ((void*)&iph[1] > data_end)
-        return 0;
-    return iph->protocol;
-}
-static inline int parse_ipv6(void *data, u64 nh_off, void *data_end) {
-    struct ipv6hdr *ip6h = data + nh_off;
-    if ((void*)&ip6h[1] > data_end)
-        return 0;
-    return ip6h->nexthdr;
-}
-int xdp_prog1(struct CTXTYPE *ctx) {
-    void* data_end = (void*)(long)ctx->data_end;
-    void* data = (void*)(long)ctx->data;
-    struct ethhdr *eth = data;
-    // drop packets
-    int rc = RETURNCODE; // let pass XDP_PASS or redirect to tx via XDP_TX
-    long *value;
-    uint16_t h_proto;
-    uint64_t nh_off = 0;
-    int index;
-    nh_off = sizeof(*eth);
-    if (data + nh_off  > data_end)
-        return rc;
-    h_proto = eth->h_proto;
-    // While the following code appears to be duplicated accidentally,
-    // it's intentional to handle double tags in ethernet frames.
-    if (h_proto == htons(ETH_P_8021Q) || h_proto == htons(ETH_P_8021AD)) {
-        struct vlan_hdr *vhdr;
-        vhdr = data + nh_off;
-        nh_off += sizeof(struct vlan_hdr);
-        if (data + nh_off > data_end)
-            return rc;
-            h_proto = vhdr->h_vlan_encapsulated_proto;
-    }
-    if (h_proto == htons(ETH_P_8021Q) || h_proto == htons(ETH_P_8021AD)) {
-        struct vlan_hdr *vhdr;
-        vhdr = data + nh_off;
-        nh_off += sizeof(struct vlan_hdr);
-        if (data + nh_off > data_end)
-            return rc;
-            h_proto = vhdr->h_vlan_encapsulated_proto;
-    }
-    if (h_proto == htons(ETH_P_IP))
-        index = parse_ipv4(data, nh_off, data_end);
-    else if (h_proto == htons(ETH_P_IPV6))
-       index = parse_ipv6(data, nh_off, data_end);
-    else
-        index = 0;
-    value = dropcnt.lookup(&index);
-    if (value) lock_xadd(value, 1);
-    return rc;
-}
-`
 
 const (
 	// CNIPluginName is the name of CNI plugin
@@ -399,96 +329,29 @@ func (plugin *cniNetworkPlugin) SetUpPod(namespace string, name string, id kubec
 
 	_, err = plugin.addToNetwork(cniTimeoutCtx, plugin.getDefaultNetwork(), name, namespace, id, netnsPath, annotations, options)
 	klog.InfoS("kubelet attaches the eProxy to the Pod Sandbox")
-	err = ns.WithNetNSPath(netnsPath, func(hostNS ns.NetNS) error {
-		iface, err := net.InterfaceByName("eth0");
-		if err == nil {
-			klog.InfoS("Interfaces: ", iface.Name)
-			ret := "XDP_DROP"
-			ctxtype := "xdp_md"
-
-			module := bpf.NewModule(source, []string{
-				"-w",
-				"-DRETURNCODE=" + ret,
-				"-DCTXTYPE=" + ctxtype,
-			})
-
-			fn, err := module.Load("xdp_prog1", C.BPF_PROG_TYPE_XDP, 1, 65536)
-			if err != nil {
-				klog.InfoS("Failed to load xdp prog: ", err)
-				return err
-			}
-
-			err = module.AttachXDP(iface.Name, fn)
-			if err != nil {
-				klog.InfoS("Failed to attach xdp prog: ", err)
-				return err
-			}
-			klog.InfoS("Load successfull")
+	err = WithNetNSPath(netnsPath, func(hostNS 	NetNS) error {
+		// iface, err := net.InterfaceByName("eth0")
+		cmd := osexec.Command("ip", "link", "show", "dev", "eth0")
+		stdout, err := cmd.Output()
+		if err != nil {
+			log.Fatal(err)
+			return err
 		}
-		return err
+		// if err := cmd.Start(); err != nil {
+		// 	log.Fatal(err)
+		// 	return err
+		// }
+		// if err := cmd.Wait(); err != nil {
+		// 	log.Fatal(err)
+		// 	return err
+		// }
+		fmt.Printf("eproxy: %s\n", stdout)
+		parts := strings.Split(string(stdout), "@if")[1]
+		ifidx := strings.Split(parts, ": <")[0]
+		fmt.Printf("veth ifidx: %s\n", ifidx)
+		// Send ifidx to the eproxy loader
+		return nil
 	})
-	// Attach the eBPF programs to the target Veth (pod)
-	// err = ns.WithNetNSPath(netnsPath, func(hostNS ns.NetNS) error {
-	// 	iface, err := net.InterfaceByName("eth0");
-	// 	if err == nil {
-	// 		klog.InfoS("Interfaces: ", iface.Name)
-	// 		ret := "XDP_DROP"
-	// 		ctxtype := "xdp_md"
-
-	// 		module := bpf.NewModule(source, []string{
-	// 			"-w",
-	// 			"-DRETURNCODE=" + ret,
-	// 			"-DCTXTYPE=" + ctxtype,
-	// 		})
-
-	// 		monitor_1, err := module.Load("app_request", C.BPF_PROG_TYPE_XDP, 1, 65536)
-	// 		if err != nil {
-	// 			klog.InfoS("Failed to load app_request prog: ", err)
-	// 			return err
-	// 		}
-	// 		monitor_2, err := module.Load("app_response", C.BPF_PROG_TYPE_XDP, 1, 65536)
-	// 		if err != nil {
-	// 			klog.InfoS("Failed to load app_response prog: ", err)
-	// 			return err
-	// 		}
-	// 		readi_1, err := module.Load("readi_ingress", C.BPF_PROG_TYPE_XDP, 1, 65536)
-	// 		if err != nil {
-	// 			klog.InfoS("Failed to load readi_ingress prog: ", err)
-	// 			return err
-	// 		}
-	// 		readi_2, err := module.Load("readi_egress", C.BPF_PROG_TYPE_XDP, 1, 65536)
-	// 		if err != nil {
-	// 			klog.InfoS("Failed to load readi_egress prog: ", err)
-	// 			return err
-	// 		}
-
-	// 		err = module.AttachXDP(iface.Name, monitor_1)
-	// 		if err != nil {
-	// 			klog.InfoS("Failed to attach monitor_1 prog: ", err)
-	// 			return err
-	// 		}
-	// 		err = module.AttachXDP(iface.Name, monitor_2)
-	// 		if err != nil {
-	// 			klog.InfoS("Failed to attach monitor_2 prog: ", err)
-	// 			return err
-	// 		}
-	// 		err = module.AttachXDP(iface.Name, readi_1)
-	// 		if err != nil {
-	// 			klog.InfoS("Failed to attach readi_1 prog: ", err)
-	// 			return err
-	// 		}
-	// 		err = module.AttachXDP(iface.Name, readi_2)
-	// 		if err != nil {
-	// 			klog.InfoS("Failed to attach readi_2 prog: ", err)
-	// 			return err
-	// 		}
-
-
-	// 		klog.InfoS("Load successfull")
-	// 	}
-	// 	return err
-	// })
-
 	return err
 }
 
@@ -645,4 +508,213 @@ func maxStringLengthInLog(length int) int {
 		return length
 	}
 	return maxStringLength
+}
+
+// Returns an object representing the current OS thread's network namespace
+func GetCurrentNS() (NetNS, error) {
+	// Lock the thread in case other goroutine executes in it and changes its
+	// network namespace after getCurrentThreadNetNSPath(), otherwise it might
+	// return an unexpected network namespace.
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	return GetNS(getCurrentThreadNetNSPath())
+}
+
+func getCurrentThreadNetNSPath() string {
+	// /proc/self/ns/net returns the namespace of the main thread, not
+	// of whatever thread this goroutine is running on.  Make sure we
+	// use the thread's net namespace since the thread is switching around
+	return fmt.Sprintf("/proc/%d/task/%d/ns/net", os.Getpid(), unix.Gettid())
+}
+
+func (ns *netNS) Close() error {
+	if err := ns.errorIfClosed(); err != nil {
+		return err
+	}
+
+	if err := ns.file.Close(); err != nil {
+		return fmt.Errorf("Failed to close %q: %v", ns.file.Name(), err)
+	}
+	ns.closed = true
+
+	return nil
+}
+
+func (ns *netNS) Set() error {
+	if err := ns.errorIfClosed(); err != nil {
+		return err
+	}
+
+	if err := unix.Setns(int(ns.Fd()), unix.CLONE_NEWNET); err != nil {
+		return fmt.Errorf("Error switching to ns %v: %v", ns.file.Name(), err)
+	}
+
+	return nil
+}
+
+type NetNS interface {
+	// Executes the passed closure in this object's network namespace,
+	// attempting to restore the original namespace before returning.
+	// However, since each OS thread can have a different network namespace,
+	// and Go's thread scheduling is highly variable, callers cannot
+	// guarantee any specific namespace is set unless operations that
+	// require that namespace are wrapped with Do().  Also, no code called
+	// from Do() should call runtime.UnlockOSThread(), or the risk
+	// of executing code in an incorrect namespace will be greater.  See
+	// https://github.com/golang/go/wiki/LockOSThread for further details.
+	Do(toRun func(NetNS) error) error
+
+	// Sets the current network namespace to this object's network namespace.
+	// Note that since Go's thread scheduling is highly variable, callers
+	// cannot guarantee the requested namespace will be the current namespace
+	// after this function is called; to ensure this wrap operations that
+	// require the namespace with Do() instead.
+	Set() error
+
+	// Returns the filesystem path representing this object's network namespace
+	Path() string
+
+	// Returns a file descriptor representing this object's network namespace
+	Fd() uintptr
+
+	// Cleans up this instance of the network namespace; if this instance
+	// is the last user the namespace will be destroyed
+	Close() error
+}
+
+type netNS struct {
+	file   *os.File
+	closed bool
+}
+
+// netNS implements the NetNS interface
+var _ NetNS = &netNS{}
+
+const (
+	// https://github.com/torvalds/linux/blob/master/include/uapi/linux/magic.h
+	NSFS_MAGIC   = 0x6e736673
+	PROCFS_MAGIC = 0x9fa0
+)
+
+type NSPathNotExistErr struct{ msg string }
+
+func (e NSPathNotExistErr) Error() string { return e.msg }
+
+type NSPathNotNSErr struct{ msg string }
+
+func (e NSPathNotNSErr) Error() string { return e.msg }
+
+func IsNSorErr(nspath string) error {
+	stat := syscall.Statfs_t{}
+	if err := syscall.Statfs(nspath, &stat); err != nil {
+		if os.IsNotExist(err) {
+			err = NSPathNotExistErr{msg: fmt.Sprintf("failed to Statfs %q: %v", nspath, err)}
+		} else {
+			err = fmt.Errorf("failed to Statfs %q: %v", nspath, err)
+		}
+		return err
+	}
+
+	switch stat.Type {
+	case PROCFS_MAGIC, NSFS_MAGIC:
+		return nil
+	default:
+		return NSPathNotNSErr{msg: fmt.Sprintf("unknown FS magic on %q: %x", nspath, stat.Type)}
+	}
+}
+
+// Returns an object representing the namespace referred to by @path
+func GetNS(nspath string) (NetNS, error) {
+	err := IsNSorErr(nspath)
+	if err != nil {
+		return nil, err
+	}
+
+	fd, err := os.Open(nspath)
+	if err != nil {
+		return nil, err
+	}
+
+	return &netNS{file: fd}, nil
+}
+
+func (ns *netNS) Path() string {
+	return ns.file.Name()
+}
+
+func (ns *netNS) Fd() uintptr {
+	return ns.file.Fd()
+}
+
+func (ns *netNS) errorIfClosed() error {
+	if ns.closed {
+		return fmt.Errorf("%q has already been closed", ns.file.Name())
+	}
+	return nil
+}
+
+func (ns *netNS) Do(toRun func(NetNS) error) error {
+	if err := ns.errorIfClosed(); err != nil {
+		return err
+	}
+
+	containedCall := func(hostNS NetNS) error {
+		threadNS, err := GetCurrentNS()
+		if err != nil {
+			return fmt.Errorf("failed to open current netns: %v", err)
+		}
+		defer threadNS.Close()
+
+		// switch to target namespace
+		if err = ns.Set(); err != nil {
+			return fmt.Errorf("error switching to ns %v: %v", ns.file.Name(), err)
+		}
+		defer func() {
+			err := threadNS.Set() // switch back
+			if err == nil {
+				// Unlock the current thread only when we successfully switched back
+				// to the original namespace; otherwise leave the thread locked which
+				// will force the runtime to scrap the current thread, that is maybe
+				// not as optimal but at least always safe to do.
+				runtime.UnlockOSThread()
+			}
+		}()
+
+		return toRun(hostNS)
+	}
+
+	// save a handle to current network namespace
+	hostNS, err := GetCurrentNS()
+	if err != nil {
+		return fmt.Errorf("Failed to open current namespace: %v", err)
+	}
+	defer hostNS.Close()
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+
+	// Start the callback in a new green thread so that if we later fail
+	// to switch the namespace back to the original one, we can safely
+	// leave the thread locked to die without a risk of the current thread
+	// left lingering with incorrect namespace.
+	var innerError error
+	go func() {
+		defer wg.Done()
+		runtime.LockOSThread()
+		innerError = containedCall(hostNS)
+	}()
+	wg.Wait()
+
+	return innerError
+}
+
+// WithNetNSPath executes the passed closure under the given network
+// namespace, restoring the original namespace afterwards.
+func WithNetNSPath(nspath string, toRun func(NetNS) error) error {
+	ns, err := GetNS(nspath)
+	if err != nil {
+		return err
+	}
+	defer ns.Close()
+	return ns.Do(toRun)
 }
