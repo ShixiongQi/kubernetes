@@ -46,6 +46,8 @@ import (
 	"os"
 	"runtime"
 	"syscall"
+	"bytes"
+	"net/http"
 
 	"golang.org/x/sys/unix"
 )
@@ -349,7 +351,13 @@ func (plugin *cniNetworkPlugin) SetUpPod(namespace string, name string, id kubec
 		parts := strings.Split(string(stdout), "@if")[1]
 		ifidx := strings.Split(parts, ": <")[0]
 		fmt.Printf("veth ifidx: %s\n", ifidx)
-		// Send ifidx to the eproxy loader
+		// TODO: Send ifidx to the eproxy loader
+		vethIdx := []byte(ifidx)
+		_, err = http.Post("http://localhost:2222", "text/plain", bytes.NewBuffer(vethIdx))
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Printf("veth ifidx posted to eproxy\n")
 		return nil
 	})
 	return err
